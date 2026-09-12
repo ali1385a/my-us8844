@@ -139,7 +139,7 @@ KIRA_BASE = os.environ.get("KIRA_BASE", "https://kiraai.vn/api/v1").rstrip("/")
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# قابلیت‌های اضافی v5 — فایل vroom_features_v5.py باید کنار همین bot باشد
+# قابلیت‌های اضافی v5 — اول فایل کناری، وگرنه embed داخل همین فایل
 vfeat = None
 try:
     import vroom_features_v5 as vfeat
@@ -160,8 +160,498 @@ except ImportError:
     except Exception as _vf_err:
         vfeat = None
         print(f"⚠️ vroom_features_v5 load failed: {_vf_err}")
+
 if vfeat is None:
-    print("⚠️ فایل vroom_features_v5.py کنار bot.py نیست — قابلیت‌های v5 محدود می‌شوند")
+    import types as _t_vfeat
+    import math as _m_vfeat
+    import hashlib as _h_vfeat
+    import tempfile as _tf_vfeat
+    vfeat = _t_vfeat.ModuleType("vroom_features_v5")
+    _KIRA_KEY = os.environ.get("KIRA_API_KEY", "kira_502f0e75e02809860eb57ffa7c0894fe")
+    _KIRA_BASE = os.environ.get("KIRA_BASE", "https://kiraai.vn/api/v1").rstrip("/")
+    _KIRA_CHAT = os.environ.get("KIRA_CHAT_MODEL", "kira-3.5-flash")
+    _KIRA_IMG = os.environ.get("KIRA_IMAGE_MODEL", "kira-3.0-image")
+    _KIRA_TTS = os.environ.get("KIRA_TTS_MODEL", "kira-tts-3.0")
+    _KIRA_STT = os.environ.get("KIRA_STT_MODEL", "whisper-1")
+    _EMOJI_AB = list("😀😁😂🤣😃😄😅😆😉😊😋😎😍😘😗😙😚🙂🤗🤔😐😑😶🙄😏😣😥😮🤐😯😪😫😴😌🤓😛😜😝🤤😒😓😔😕🙃🤑😲☹🙁😖😞😟😤😢😭😦😧😨😩🤯😬😰😱😳🤪😵😡😠🤬😷🤒🤕🤢🤮🤧😇🤠🤡🤥🤫🤭🧐😈👿👹👺💀👻👽👾🤖💩😺😸😹")
+    _NUM_AB = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
+    def _ks(secret, n):
+        out, block = b"", secret.encode()
+        while len(out) < n:
+            block = _h_vfeat.sha256(block + secret.encode()).digest()
+            out += block
+        return out[:n]
+
+    async def kira_chat(prompt, system=None):
+        msgs = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": prompt}]
+        try:
+            r = await asyncio.to_thread(requests.post, f"{_KIRA_BASE}/chat/completions",
+                headers={"Authorization": f"Bearer {_KIRA_KEY}", "Content-Type": "application/json"},
+                json={"model": _KIRA_CHAT, "messages": msgs, "temperature": 0.7}, timeout=90)
+            if r.status_code == 200:
+                return (r.json().get("choices") or [{}])[0].get("message", {}).get("content", "").strip() or "❌"
+            return f"❌ Kira {r.status_code}: {r.text[:200]}"
+        except Exception as e:
+            return f"❌ {e}"
+
+    async def kira_image(prompt, size="1024x1024"):
+        try:
+            payload = {"model": _KIRA_IMG, "prompt": prompt, "n": 1, "size": size, "response_format": "url"}
+            r = await asyncio.to_thread(requests.post, f"{_KIRA_BASE}/images/generations",
+                headers={"Authorization": f"Bearer {_KIRA_KEY}", "Content-Type": "application/json"}, json=payload, timeout=120)
+            if r.status_code != 200:
+                payload["response_format"] = "b64_json"
+                r = await asyncio.to_thread(requests.post, f"{_KIRA_BASE}/images/generations",
+                    headers={"Authorization": f"Bearer {_KIRA_KEY}", "Content-Type": "application/json"}, json=payload, timeout=120)
+            if r.status_code != 200:
+                return None
+            item = (r.json().get("data") or [{}])[0]
+            out = os.path.join(_tf_vfeat.gettempdir(), f"kira_img_{int(time.time()*1000)}.png")
+            if item.get("url"):
+                img = await asyncio.to_thread(requests.get, item["url"], timeout=60)
+                if img.status_code == 200:
+                    open(out, "wb").write(img.content)
+                    return out
+            if item.get("b64_json"):
+                open(out, "wb").write(base64.b64decode(item["b64_json"]))
+                return out
+        except Exception as e:
+            logger.error(f"kira_image: {e}")
+        return None
+
+    async def kira_tts(text, voice="alloy"):
+        try:
+            r = await asyncio.to_thread(requests.post, f"{_KIRA_BASE}/audio/speech",
+                headers={"Authorization": f"Bearer {_KIRA_KEY}", "Content-Type": "application/json"},
+                json={"model": _KIRA_TTS, "input": text[:4000], "voice": voice, "response_format": "mp3"}, timeout=90)
+            if r.status_code != 200:
+                return None
+            out = os.path.join(_tf_vfeat.gettempdir(), f"kira_tts_{int(time.time()*1000)}.mp3")
+            open(out, "wb").write(r.content)
+            return out
+        except Exception:
+            return None
+
+    async def kira_stt(audio_path):
+        try:
+            with open(audio_path, "rb") as f:
+                r = await asyncio.to_thread(requests.post, f"{_KIRA_BASE}/audio/transcriptions",
+                    headers={"Authorization": f"Bearer {_KIRA_KEY}"},
+                    files={"file": (os.path.basename(audio_path), f, "audio/mpeg")}, data={"model": _KIRA_STT}, timeout=120)
+            if r.status_code == 200:
+                j = r.json()
+                return j.get("text") or j.get("transcript") or str(j)
+            return f"❌ STT {r.status_code}"
+        except Exception as e:
+            return f"❌ {e}"
+
+    def encrypt_text(plain, mode="emoji", secret="VROOM_SELF_V5"):
+        data = plain.encode()
+        stream = _ks(secret, len(data))
+        xored = bytes(a ^ b for a, b in zip(data, stream))
+        if mode in ("emoji", "ایموجی"):
+            num = int.from_bytes(xored, "big") if xored else 0
+            if not xored:
+                return _EMOJI_AB[0]
+            base, chars = len(_EMOJI_AB), []
+            while num > 0:
+                num, rem = divmod(num, base)
+                chars.append(_EMOJI_AB[rem])
+            return f"E{len(data):04d}" + "".join(reversed(chars))
+        num = int.from_bytes(xored, "big") if xored else 0
+        base, chars = len(_NUM_AB), []
+        if not xored:
+            return "N0000" + _NUM_AB[0]
+        while num > 0:
+            num, rem = divmod(num, base)
+            chars.append(_NUM_AB[rem])
+        return f"N{len(data):04d}" + "".join(reversed(chars))
+
+    def decrypt_text(cipher, secret="VROOM_SELF_V5"):
+        try:
+            if not cipher or len(cipher) < 6:
+                return cipher
+            mode, length, body = cipher[0], int(cipher[1:5]), cipher[5:]
+            if mode == "E":
+                alphabet, base = _EMOJI_AB, len(_EMOJI_AB)
+            elif mode == "N":
+                alphabet, base = _NUM_AB, len(_NUM_AB)
+            else:
+                return cipher
+            idx, num = {ch: i for i, ch in enumerate(alphabet)}, 0
+            for ch in body:
+                if ch not in idx:
+                    return cipher
+                num = num * base + idx[ch]
+            raw = num.to_bytes(length, "big") if length else b""
+            stream = _ks(secret, len(raw))
+            return bytes(a ^ b for a, b in zip(raw, stream)).decode("utf-8")
+        except Exception:
+            return cipher
+
+    def looks_encrypted(text):
+        return bool(text and len(text) >= 6 and text[0] in ("E", "N") and text[1:5].isdigit())
+
+    def convert_digits_font(text, font_digits):
+        if not font_digits or len(font_digits) < 10:
+            return text
+        mapping = {str(i): font_digits[i] for i in range(10)}
+        return "".join(mapping.get(c, c) for c in text)
+
+    def safe_time_string(now=None, with_seconds=False):
+        if now is None:
+            now = datetime.now()
+        return now.strftime("%H:%M:%S" if with_seconds else "%H:%M")
+
+    def format_time_with_font(font_digits, with_seconds=False, now=None):
+        return convert_digits_font(safe_time_string(now, with_seconds), font_digits)
+
+    def validate_font_digits(s):
+        s = (s or "").strip()
+        return (True, s) if len(s) == 10 else (False, "فونت باید دقیقاً ۱۰ کاراکتر باشد")
+
+    def make_qr_image(data, out_path=None):
+        qr = qrcode.QRCode(version=None, error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=8, border=2)
+        qr.add_data(data)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white")
+        if not out_path:
+            out_path = os.path.join(_tf_vfeat.gettempdir(), f"qr_{int(time.time()*1000)}.png")
+        img.save(out_path)
+        return out_path
+
+    def scan_qr_from_image(path):
+        try:
+            from pyzbar.pyzbar import decode as zbar_decode
+            results = zbar_decode(Image.open(path))
+            if results:
+                return "\n".join(r.data.decode("utf-8", errors="replace") for r in results)
+        except Exception:
+            pass
+        try:
+            import cv2
+            data, _, _ = cv2.QRCodeDetector().detectAndDecode(cv2.imread(path))
+            if data:
+                return data
+        except Exception:
+            pass
+        return ""
+
+    WORLD_CLOCKS = [
+        ("🇮🇷 تهران", "Asia/Tehran"), ("🇹🇷 استانبول", "Europe/Istanbul"), ("🇦🇪 دبی", "Asia/Dubai"),
+        ("🇬🇧 لندن", "Europe/London"), ("🇩🇪 برلین", "Europe/Berlin"), ("🇫🇷 پاریس", "Europe/Paris"),
+        ("🇺🇸 نیویورک", "America/New_York"), ("🇺🇸 لس‌آنجلس", "America/Los_Angeles"),
+        ("🇯🇵 توکیو", "Asia/Tokyo"), ("🇨🇳 پکن", "Asia/Shanghai"), ("🇮🇳 دهلی", "Asia/Kolkata"), ("🇷🇺 مسکو", "Europe/Moscow"),
+    ]
+
+    def world_clock_text():
+        lines = ["🌍 <b>ساعت جهانی</b>\n"]
+        try:
+            from zoneinfo import ZoneInfo
+            for name, tz in WORLD_CLOCKS:
+                try:
+                    now = datetime.now(ZoneInfo(tz))
+                    lines.append(f"{name}: <code>{now.strftime('%H:%M:%S')}</code>  {now.strftime('%Y-%m-%d')}")
+                except Exception:
+                    lines.append(f"{name}: —")
+        except Exception:
+            for name, off in [("تهران", 3.5), ("لندن", 0), ("نیویورک", -4), ("توکیو", 9)]:
+                t = datetime.utcnow() + timedelta(hours=off)
+                lines.append(f"{name}: {t.strftime('%H:%M:%S')}")
+        return "\n".join(lines)
+
+    _SAFE_MATH = {"abs": abs, "round": round, "min": min, "max": max, "sin": _m_vfeat.sin, "cos": _m_vfeat.cos,
+                  "tan": _m_vfeat.tan, "sqrt": _m_vfeat.sqrt, "log": _m_vfeat.log, "log10": _m_vfeat.log10,
+                  "pi": _m_vfeat.pi, "e": _m_vfeat.e, "pow": pow}
+
+    def calc_expr(expr):
+        expr = expr.strip().replace("×", "*").replace("÷", "/").replace("^", "**")
+        expr = re.sub(r"[^0-9+\-*/().,%\seEsqrtlogabcpowminmxaint]", "", expr)
+        try:
+            expr2 = re.sub(r"(\d+(?:\.\d+)?)%", r"(\1/100)", expr)
+            val = eval(expr2, {"__builtins__": {}}, _SAFE_MATH)
+            if isinstance(val, float) and val == int(val):
+                val = int(val)
+            return f"🧮 <code>{expr}</code>\n= <b>{val}</b>"
+        except Exception as e:
+            return f"❌ {e}"
+
+    def calc_graph_image(expr, x_min=-10, x_max=10):
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+            import numpy as np
+            xs = np.linspace(x_min, x_max, 400)
+            safe = expr.replace("^", "**")
+            ys = []
+            for x in xs:
+                try:
+                    ys.append(float(eval(safe, {"__builtins__": {}, "x": x, **_SAFE_MATH})))
+                except Exception:
+                    ys.append(float("nan"))
+            fig, ax = plt.subplots(figsize=(7, 4), dpi=120)
+            ax.plot(xs, ys, color="#00e5ff", lw=2)
+            ax.axhline(0, color="#666", lw=0.8)
+            ax.axvline(0, color="#666", lw=0.8)
+            ax.set_facecolor("#0d1117")
+            fig.patch.set_facecolor("#0d1117")
+            ax.tick_params(colors="#aaa")
+            ax.set_title(f"y = {expr}", color="#fff")
+            out = os.path.join(_tf_vfeat.gettempdir(), f"graph_{int(time.time()*1000)}.png")
+            fig.savefig(out, bbox_inches="tight")
+            plt.close(fig)
+            return out
+        except Exception:
+            return None
+
+    async def get_weather(city):
+        try:
+            r = await asyncio.to_thread(requests.get, f"https://wttr.in/{quote(city)}?format=j1&lang=fa", timeout=15)
+            if r.status_code != 200:
+                r2 = await asyncio.to_thread(requests.get, f"https://wttr.in/{quote(city)}?format=3", timeout=10)
+                return r2.text if r2.status_code == 200 else "❌ شهر یافت نشد"
+            j = r.json()
+            cur = j["current_condition"][0]
+            area = (j.get("nearest_area") or [{}])[0]
+            name = (area.get("areaName") or [{"value": city}])[0]["value"]
+            country = (area.get("country") or [{"value": ""}])[0]["value"]
+            desc = (cur.get("lang_fa") or cur.get("weatherDesc") or [{"value": ""}])[0]["value"]
+            return (f"🌤 <b>آب‌وهوای {name}</b> ({country})\n🌡️ <code>{cur.get('temp_C')}°C</code> (احساس {cur.get('FeelsLikeC')}°C)\n"
+                    f"💧 {cur.get('humidity')}% | 💨 {cur.get('windspeedKmph')} km/h\n☁️ {desc}")
+        except Exception as e:
+            return f"❌ {e}"
+
+    async def wiki_search(query, lang="fa"):
+        try:
+            r = await asyncio.to_thread(requests.get, f"https://{lang}.wikipedia.org/api/rest_v1/page/summary/{quote(query)}", timeout=15)
+            if r.status_code == 200:
+                j = r.json()
+                return f"📖 <b>{j.get('title', query)}</b>\n\n{(j.get('extract') or '')[:800]}\n\n🔗 {j.get('content_urls', {}).get('desktop', {}).get('page', '')}"
+            return "❌ چیزی یافت نشد"
+        except Exception as e:
+            return f"❌ {e}"
+
+    async def github_user(username):
+        try:
+            r = await asyncio.to_thread(requests.get, f"https://api.github.com/users/{quote(username)}",
+                headers={"Accept": "application/vnd.github+json", "User-Agent": "VROOM-SelfBot"}, timeout=15)
+            if r.status_code != 200:
+                return f"❌ کاربر یافت نشد ({r.status_code})"
+            u = r.json()
+            return f"🐙 <b>{u.get('login')}</b>\n👤 {u.get('name') or '—'}\n📝 {u.get('bio') or '—'}\n📦 {u.get('public_repos')} | 👥 {u.get('followers')}\n🔗 {u.get('html_url')}"
+        except Exception as e:
+            return f"❌ {e}"
+
+    async def github_download_file(url):
+        try:
+            raw = url
+            if "github.com" in url and "/blob/" in url:
+                raw = url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
+            r = await asyncio.to_thread(requests.get, raw, timeout=60, headers={"User-Agent": "VROOM-SelfBot"})
+            if r.status_code != 200:
+                return None, f"❌ {r.status_code}"
+            name = raw.rstrip("/").split("/")[-1] or "file"
+            path = os.path.join(_tf_vfeat.gettempdir(), f"gh_{int(time.time()*1000)}_{name}")
+            open(path, "wb").write(r.content)
+            return path, name
+        except Exception as e:
+            return None, f"❌ {e}"
+
+    async def search_app_or_media(query, kind="app"):
+        q = query.strip()
+        search_q = f"{q} android apk download official" if kind == "app" else (f"{q} download mp3" if kind == "music" else f"{q} watch online")
+        lines = [f"🔎 نتایج برای: <b>{q}</b>\n"]
+        try:
+            api_key = GOOGLE_SEARCH_API_KEY
+            cse_id = GOOGLE_CSE_ID
+        except Exception:
+            api_key, cse_id = "", ""
+        if api_key and cse_id:
+            try:
+                r = await asyncio.to_thread(requests.get, "https://www.googleapis.com/customsearch/v1",
+                    params={"key": api_key, "cx": cse_id, "q": search_q, "num": 5}, timeout=15)
+                if r.status_code == 200:
+                    for i, item in enumerate((r.json().get("items") or [])[:5], 1):
+                        lines.append(f"{i}. <a href=\"{item.get('link')}\">{item.get('title')}</a>")
+                    return "\n".join(lines)
+            except Exception:
+                pass
+        lines.append("نتیجه‌ای پیدا نشد.\n⚠️ فقط از منابع رسمی دانلود کنید.")
+        return "\n".join(lines)
+
+    def find_ffmpeg():
+        import shutil
+        for p in [shutil.which("ffmpeg"), "/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", os.environ.get("FFMPEG_PATH")]:
+            if p and os.path.isfile(p) and os.access(p, os.X_OK):
+                return p
+        try:
+            import imageio_ffmpeg
+            return imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:
+            return None
+
+    async def run_ffmpeg(args, timeout=120):
+        ff = find_ffmpeg()
+        if not ff:
+            return False, "ffmpeg نصب نیست"
+        try:
+            proc = await asyncio.create_subprocess_exec(ff, "-y", *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            try:
+                _, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            except asyncio.TimeoutError:
+                proc.kill()
+                return False, "timeout"
+            return (True, "") if proc.returncode == 0 else (False, (err or b"").decode("utf-8", errors="ignore")[-300:])
+        except Exception as e:
+            return False, str(e)
+
+    async def voice_to_audio_file(src, as_music=True):
+        out = src + (".out.mp3" if as_music else ".out.ogg")
+        if as_music:
+            ok, _ = await run_ffmpeg(["-i", src, "-vn", "-acodec", "libmp3lame", "-q:a", "4", out])
+        else:
+            ok, _ = await run_ffmpeg(["-i", src, "-vn", "-acodec", "libopus", "-b:a", "64k", out])
+        return out if ok and os.path.exists(out) else None
+
+    async def change_voice_pitch(src, semitones=4.0):
+        out = src + ".pitch.ogg"
+        factor = 2 ** (semitones / 12.0)
+        ok, _ = await run_ffmpeg(["-i", src, "-vn", "-af", f"asetrate=44100*{factor:.4f},aresample=44100,atempo={1/factor:.4f}", "-acodec", "libopus", "-b:a", "64k", out])
+        return out if ok and os.path.exists(out) else None
+
+    async def video_to_note(src):
+        out = src + ".note.mp4"
+        ok, _ = await run_ffmpeg(["-i", src, "-t", "59", "-vf", "crop=min(iw\\,ih):min(iw\\,ih),scale=384:384",
+                                  "-c:v", "libx264", "-preset", "fast", "-crf", "28", "-c:a", "aac", "-b:a", "64k", "-movflags", "+faststart", out])
+        return out if ok and os.path.exists(out) else None
+
+    async def add_watermark(src, text):
+        try:
+            img = Image.open(src).convert("RGBA")
+            overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+            d = ImageDraw.Draw(overlay)
+            try:
+                font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", max(20, img.width // 20))
+            except Exception:
+                font = ImageFont.load_default()
+            d.text((20, img.height - 60), text, fill=(255, 255, 255, 160), font=font)
+            out = src + ".wm.jpg"
+            Image.alpha_composite(img, overlay).convert("RGB").save(out, "JPEG", quality=90)
+            return out
+        except Exception:
+            return None
+
+    async def image_filter(src, name="gray"):
+        try:
+            from PIL import ImageEnhance, ImageFilter, ImageOps
+            img = Image.open(src).convert("RGB")
+            name = (name or "gray").lower()
+            if name in ("gray", "خاکستری", "سیاه"):
+                img = ImageOps.grayscale(img).convert("RGB")
+            elif name in ("blur", "بلور"):
+                img = img.filter(ImageFilter.GaussianBlur(4))
+            elif name in ("sharp", "شارپ"):
+                img = img.filter(ImageFilter.SHARPEN)
+            elif name in ("sepia", "سپیا"):
+                img = ImageOps.colorize(ImageOps.grayscale(img), "#704214", "#FFF5E1")
+            elif name in ("bright", "روشن"):
+                img = ImageEnhance.Brightness(img).enhance(1.4)
+            elif name in ("contrast", "کنتراست"):
+                img = ImageEnhance.Contrast(img).enhance(1.5)
+            elif name in ("invert", "معکوس"):
+                img = ImageOps.invert(img)
+            out = src + f".{name}.jpg"
+            img.save(out, "JPEG", quality=92)
+            return out
+        except Exception:
+            return None
+
+    async def photo_to_pdf(paths):
+        try:
+            imgs = [Image.open(p).convert("RGB") for p in paths]
+            out = os.path.join(_tf_vfeat.gettempdir(), f"pdf_{int(time.time()*1000)}.pdf")
+            imgs[0].save(out, save_all=True, append_images=imgs[1:] if len(imgs) > 1 else [])
+            return out
+        except Exception:
+            return None
+
+    async def pdf_to_images(pdf_path):
+        try:
+            from pdf2image import convert_from_path
+            outs = []
+            for i, page in enumerate(convert_from_path(pdf_path, dpi=120)[:20]):
+                p = pdf_path + f".p{i}.jpg"
+                page.save(p, "JPEG")
+                outs.append(p)
+            return outs
+        except Exception:
+            return []
+
+    async def text_on_gif_or_image(src, text, color="white", font_size=36):
+        try:
+            from PIL import ImageSequence
+            im = Image.open(src)
+            color_map = {"white": (255, 255, 255), "black": (0, 0, 0), "red": (255, 40, 40), "green": (40, 220, 80),
+                         "blue": (40, 120, 255), "yellow": (255, 220, 40), "cyan": (0, 255, 220),
+                         "صورتی": (255, 100, 180), "سفید": (255, 255, 255), "سیاه": (0, 0, 0), "قرمز": (255, 40, 40)}
+            fill = color_map.get(color.lower(), (255, 255, 255))
+            try:
+                font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", font_size)
+            except Exception:
+                font = ImageFont.load_default()
+
+            def draw_text(frame):
+                frame = frame.convert("RGBA")
+                d = ImageDraw.Draw(frame)
+                bb = d.textbbox((0, 0), text, font=font)
+                tw, th = bb[2] - bb[0], bb[3] - bb[1]
+                x, y = (frame.width - tw) // 2, frame.height - th - 20
+                d.text((x + 2, y + 2), text, fill=(0, 0, 0, 180), font=font)
+                d.text((x, y), text, fill=fill + (255,), font=font)
+                return frame
+
+            if getattr(im, "is_animated", False):
+                frames, durations = [], []
+                for frame in ImageSequence.Iterator(im):
+                    frames.append(draw_text(frame.copy()))
+                    durations.append(frame.info.get("duration", 80))
+                out = src + ".txt.gif"
+                frames[0].save(out, save_all=True, append_images=frames[1:], duration=durations, loop=0, disposal=2)
+                return out
+            out = src + ".txt.png"
+            draw_text(im).convert("RGB").save(out)
+            return out
+        except Exception:
+            return None
+
+    FEATURE_HELP = (
+        "📚 <b>دستورات قابلیت‌های جدید</b>\n\n"
+        "🤖 <code>هوش [متن]</code> | <code>ساخت عکس [توضیح]</code>\n"
+        "🎙 <code>متن به ویس ...</code> | ریپلای + <code>ویس به متن</code>\n"
+        "🔐 ریپلای + <code>رمزنگاری ایموجی</code> / <code>رمزگشایی</code>\n"
+        "📱 <code>کیوار [متن]</code> | ریپلای + <code>اسکن</code>\n"
+        "🧮 <code>حساب 2+2</code> | <code>نمودار x**2</code>\n"
+        "🌍 <code>ساعت جهانی</code> | 🌤 <code>آب و هوا تهران</code>\n"
+        "📖 <code>ویکی ...</code> | 🐙 <code>گیتهاب USER</code>\n"
+        "⚙️ <code>پیشوند روشن/خاموش</code> | <code>آنلاین روشن/خاموش</code>\n"
+        "🔎 <code>سرچ برنامه روبیکا</code> | ➕ <code>اضافه فونت 0123456789</code>\n"
+    )
+
+    for _n, _f in list(locals().items()):
+        if callable(_f) or _n in ("FEATURE_HELP", "WORLD_CLOCKS"):
+            if not _n.startswith("_") or _n in ("_SAFE_MATH",):
+                setattr(vfeat, _n, _f)
+    for _n in ("kira_chat", "kira_image", "kira_tts", "kira_stt", "encrypt_text", "decrypt_text", "looks_encrypted",
+               "convert_digits_font", "safe_time_string", "format_time_with_font", "validate_font_digits",
+               "make_qr_image", "scan_qr_from_image", "world_clock_text", "calc_expr", "calc_graph_image",
+               "get_weather", "wiki_search", "github_user", "github_download_file", "search_app_or_media",
+               "find_ffmpeg", "run_ffmpeg", "voice_to_audio_file", "change_voice_pitch", "video_to_note",
+               "add_watermark", "image_filter", "photo_to_pdf", "pdf_to_images", "text_on_gif_or_image", "FEATURE_HELP"):
+        if _n in locals():
+            setattr(vfeat, _n, locals()[_n])
+    print("✅ vfeat embedded — single complete file")
 
 API_CONFIGS = [
     {"api_id": 22409632, "api_hash": "b74c1ee200ad9ced6315859e9bd4125a"},
