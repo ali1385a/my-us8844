@@ -100,7 +100,7 @@ def home():
     return jsonify({
         "status": "running",
         "bot": "VROOM",
-        "version": "4.9.6"
+        "version": "5.0.0"
     })
 
 @flask_app.route('/health')
@@ -132,8 +132,36 @@ PAXSENIX_API_KEY = "sk-paxsenix-Xo_BAFNGgWVZ_ymWd02Rk1JHbyoDSEzfPhiolJ3F12cY6XZG
 PAXSENIX_API_URL = "https://api.paxsenix.org/v1/chat/completions"
 DEEPSEEK_FREE_URL = "https://deepseek.api-sina-free.workers.dev/?text="
 
+# KiraAI (جایگزین هوش مصنوعی قبلی)
+KIRA_API_KEY = os.environ.get("KIRA_API_KEY", "kira_502f0e75e02809860eb57ffa7c0894fe")
+KIRA_BASE = os.environ.get("KIRA_BASE", "https://kiraai.vn/api/v1").rstrip("/")
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# قابلیت‌های اضافی v5 — فایل vroom_features_v5.py باید کنار همین bot باشد
+vfeat = None
+try:
+    import vroom_features_v5 as vfeat
+except ImportError:
+    try:
+        import importlib.util
+        for _vf_path in (
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "vroom_features_v5.py"),
+            os.path.join(os.getcwd(), "vroom_features_v5.py"),
+            "/home/workdir/artifacts/vroom_features_v5.py",
+        ):
+            if os.path.isfile(_vf_path):
+                _spec = importlib.util.spec_from_file_location("vroom_features_v5", _vf_path)
+                vfeat = importlib.util.module_from_spec(_spec)
+                _spec.loader.exec_module(vfeat)
+                print(f"✅ vroom_features_v5 از {_vf_path}")
+                break
+    except Exception as _vf_err:
+        vfeat = None
+        print(f"⚠️ vroom_features_v5 load failed: {_vf_err}")
+if vfeat is None:
+    print("⚠️ فایل vroom_features_v5.py کنار bot.py نیست — قابلیت‌های v5 محدود می‌شوند")
 
 API_CONFIGS = [
     {"api_id": 22409632, "api_hash": "b74c1ee200ad9ced6315859e9bd4125a"},
@@ -2739,53 +2767,50 @@ def is_emoji_message(text):
     return bool(emoji_pattern.match(text))
 
 def convert_to_classic_font(text, font_index):
+    """تبدیل فقط رقم‌ها به فونت — ساعت همیشه معتبر می‌ماند (نه 33:67)"""
+    if font_index is None:
+        font_index = 0
+    try:
+        font_index = int(font_index) % max(len(classic_fonts), 1)
+    except Exception:
+        font_index = 0
     if font_index < 0 or font_index >= len(classic_fonts):
         font_index = 0
-    if isinstance(classic_fonts[font_index], dict):
-        font = classic_fonts[font_index]
-        return ''.join(font.get(c, c) for c in text)
-    else:
-        font = classic_fonts[font_index]
-        # map digits 0-9; if font shorter/longer, use modulo or keep original
-        result = []
-        for c in text:
-            if c.isdigit():
-                d = int(c)
-                if len(font) >= 10:
-                    result.append(font[d])
-                elif len(font) > 0:
-                    result.append(font[d % len(font)])
-                else:
-                    result.append(c)
-            else:
-                result.append(c)
-        return ''.join(result)
+    font = classic_fonts[font_index]
+    if isinstance(font, dict):
+        return ''.join(font.get(c, c) for c in str(text))
+    # فقط ۱۰ رقم اول برای 0..9 — کاراکترهای اضافه نادیده
+    digits = str(font)
+    if len(digits) < 10:
+        return str(text)
+    mapping = {str(i): digits[i] for i in range(10)}
+    return ''.join(mapping.get(c, c) for c in str(text))
 
 async def get_ai_response(text, ai_type, user_id=None):
+    """هوش مصنوعی — فقط KiraAI (جایگزین Gemini/Paxsenix/DeepSeek)"""
     try:
-        if ai_type == 1:
-            url = f"{GEMINI_URL}?key={GEMINI_KEY}"
-            payload = {"contents": [{"parts": [{"text": text}]}]}
-            response = requests.post(url, json=payload, timeout=30)
-            if response.status_code == 200:
-                result = response.json()
-                if 'candidates' in result:
-                    return result['candidates'][0]['content']['parts'][0]['text'].strip()
-        elif ai_type == 2:
-            headers = {'Authorization': f'Bearer {PAXSENIX_API_KEY}', 'Content-Type': 'application/json'}
-            data = {'model': 'gpt-3.5-turbo', 'messages': [{'role': 'user', 'content': text}]}
-            response = requests.post(PAXSENIX_API_URL, headers=headers, json=data, timeout=30)
-            if response.status_code == 200:
-                result = response.json()
-                if 'choices' in result:
-                    return result['choices'][0]['message']['content'].strip()
-        elif ai_type == 3:
-            response = requests.get(DEEPSEEK_FREE_URL + quote(text), timeout=30)
-            if response.status_code == 200:
-                return response.text.strip()
-    except:
-        pass
-    return None
+        if vfeat:
+            return await vfeat.kira_chat(text, system="تو یک دستیار مفید فارسی‌زبان هستی. مختصر و مفید جواب بده.")
+        # fallback مستقیم
+        payload = {
+            "model": os.environ.get("KIRA_CHAT_MODEL", "kira-3.5-flash"),
+            "messages": [
+                {"role": "system", "content": "تو یک دستیار مفید فارسی‌زبان هستی."},
+                {"role": "user", "content": text},
+            ],
+        }
+        r = requests.post(
+            f"{KIRA_BASE}/chat/completions",
+            headers={"Authorization": f"Bearer {KIRA_API_KEY}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=90,
+        )
+        if r.status_code == 200:
+            return (r.json().get("choices") or [{}])[0].get("message", {}).get("content", "").strip()
+        return f"❌ Kira {r.status_code}"
+    except Exception as e:
+        logger.error(f"get_ai_response: {e}")
+        return None
 
 
 # ریشه‌های دستور (فقط تطبیق دقیق کلمه اول — نه پیشوند داخل متن)
@@ -2802,6 +2827,9 @@ COMMAND_ROOTS = {
     'یوزرنیم',
     'یوزنیم', 'ایدی', 'آیدی', 'آیدی\u200cعددی', 'ایدی\u200cعددی', 'username', 'id',
     'فیلتر', 'ویس', 'صدا', 'ویدیوبهویس', 'ویدیو_به_ویس',
+    'هوش', 'ساخت', 'متن', 'رمزنگاری', 'رمزگشایی', 'کیوار', 'کیوآر', 'اسکن',
+    'حساب', 'نمودار', 'ویکی', 'گیتهاب', 'گیت‌هاب', 'واترمارک', 'پی\u200cدی\u200cاف',
+    'پیشوند', 'آنلاین', 'همیشه', 'سرچ', 'لینک', 'رمز', 'آب', 'فونت',
 }
 
 def is_bot_command_text(text: str) -> bool:
@@ -2834,8 +2862,14 @@ def is_bot_command_text(text: str) -> bool:
         'اکشن موقعیت', 'اکشن تماس', 'اکشن صحبت', 'اکشن خاموش', 'اکشن لیست',
         'نشستهای فعال', 'نشست های فعال', 'نشست‌های فعال',
         'فیلتر روشن', 'فیلتر خاموش', 'فیلتر لیست', 'فیلتر حذف',
-        'ساعت روشن', 'ساعت خاموش', 'ساعت رنگ',
+        'ساعت روشن', 'ساعت خاموش', 'ساعت رنگ', 'ساعت جهانی',
         'ویدیو به ویس', 'ویدیو به صدا',
+        'ساخت عکس', 'متن به ویس', 'ویس به متن', 'رمزنگاری ایموجی', 'رمزنگاری عدد',
+        'آب و هوا', 'آب‌وهوا', 'ویس به آهنگ', 'آهنگ به ویس', 'تغییر صدا',
+        'ویدیو نوت', 'ویدیو مسیج', 'پیشوند روشن', 'پیشوند خاموش',
+        'آنلاین روشن', 'آنلاین خاموش', 'همیشه آنلاین', 'حذف همه پیام', 'حذف همه پیام‌ها',
+        'سرچ برنامه', 'سرچ آهنگ', 'سرچ فیلم', 'دانلود گیت', 'اضافه فونت', 'فونت پیام',
+        'متن روی عکس', 'متن روی گیف',
     )
     for m in multi_starts:
         if t == m or t.startswith(m + ' '):
@@ -3688,6 +3722,23 @@ class SelfBotManager:
         command_text = command_text.replace(chr(0x200c), '')
         if not command_text:
             return
+        # پیشوند نقطه (اختیاری)
+        try:
+            _settings_pref = db.get_selfbot_settings(self.user_id)
+            require_dot = bool(_settings_pref.get('require_cmd_dot'))
+        except Exception:
+            require_dot = False
+        if require_dot:
+            if not command_text.startswith('.'):
+                return
+            command_text = command_text[1:].lstrip()
+            raw_text = command_text
+        else:
+            if command_text.startswith('.') and len(command_text) > 1 and not command_text.startswith('.پنل') and not command_text.startswith('.اهنگ') and not command_text.startswith('.بن') and not command_text.startswith('.انبن') and not command_text.startswith('.فیلتر') and not command_text.startswith('.کد'):
+                # نقطه اختیاری است — حذف کن تا دستور شناخته شود
+                maybe = command_text[1:].lstrip()
+                if is_bot_command_text(maybe):
+                    command_text = maybe
         if not is_bot_command_text(command_text) and not is_bot_command_text(raw_text):
             return
         
@@ -3697,6 +3748,401 @@ class SelfBotManager:
         
         cmd = parts[0]
         args = parts[1:] if len(parts) > 1 else []
+
+        # ========== قابلیت‌های v5 (Kira / رمز / QR / ابزار) ==========
+        if vfeat:
+            try:
+                # راهنما
+                if cmd in ('قابلیت', 'قابلیت‌ها', 'دستورات‌جدید') or (cmd == 'راهنما' and args and args[0] in ('جدید', 'قابلیت')):
+                    await event.edit(vfeat.FEATURE_HELP, parse_mode='html')
+                    return
+                # پیشوند
+                if cmd == 'پیشوند' and args:
+                    if args[0] == 'روشن':
+                        db.update_selfbot_setting(self.user_id, 'require_cmd_dot', 1)
+                        await event.edit('✅ از این به بعد دستورات باید با نقطه شروع شوند\nمثال: <code>.هوش سلام</code>', parse_mode='html')
+                        return
+                    if args[0] == 'خاموش':
+                        db.update_selfbot_setting(self.user_id, 'require_cmd_dot', 0)
+                        await event.edit('✅ پیشوند نقطه اختیاری شد')
+                        return
+                # همیشه آنلاین
+                if (cmd == 'آنلاین' and args and args[0] in ('روشن', 'خاموش')) or (cmd == 'همیشه' and args and args[0] == 'آنلاین'):
+                    on = args[-1] == 'روشن' or (cmd == 'همیشه')
+                    if cmd == 'همیشه' and len(args) > 1 and args[1] == 'خاموش':
+                        on = False
+                    if cmd == 'آنلاین' and args[0] == 'خاموش':
+                        on = False
+                    db.update_selfbot_setting(self.user_id, 'always_online', 1 if on else 0)
+                    self.always_online = on
+                    await event.edit('✅ همیشه آنلاین روشن شد' if on else '✅ همیشه آنلاین خاموش شد')
+                    return
+                # هوش Kira
+                if cmd == 'هوش' and args:
+                    await event.edit('⏳ KiraAI...')
+                    ans = await vfeat.kira_chat(' '.join(args))
+                    await event.edit(f'🤖 {ans[:3500]}')
+                    return
+                # ساخت عکس
+                if cmd == 'ساخت' and args and args[0] == 'عکس' and len(args) >= 2:
+                    prompt = ' '.join(args[1:])
+                    await event.edit('🎨 در حال ساخت عکس...')
+                    path = await vfeat.kira_image(prompt)
+                    if path and os.path.exists(path):
+                        await self.client.send_file(event.chat_id, path, caption=f'🎨 {prompt[:100]}')
+                        try:
+                            await event.delete()
+                        except Exception:
+                            pass
+                        try:
+                            os.remove(path)
+                        except Exception:
+                            pass
+                    else:
+                        await event.edit('❌ ساخت عکس ناموفق (API یا مدل را بررسی کنید)')
+                    return
+                if command_text.startswith('ساخت عکس '):
+                    prompt = command_text[len('ساخت عکس '):].strip()
+                    if prompt:
+                        await event.edit('🎨 در حال ساخت عکس...')
+                        path = await vfeat.kira_image(prompt)
+                        if path and os.path.exists(path):
+                            await self.client.send_file(event.chat_id, path, caption=f'🎨 {prompt[:100]}')
+                            try:
+                                await event.delete()
+                            except Exception:
+                                pass
+                        else:
+                            await event.edit('❌ ساخت عکس ناموفق')
+                        return
+                # متن به ویس
+                if (cmd == 'متن' and args and args[0] == 'به' and len(args) >= 3 and args[1] == 'ویس') or (cmd == 'متن' and args and args[0] == 'به' and len(args) >= 2):
+                    t = ' '.join(args[2:] if args[0] == 'به' and args[1] == 'ویس' else args[1:])
+                    if not t and event.is_reply:
+                        rm = await event.get_reply_message()
+                        t = (rm.text or rm.message or '') if rm else ''
+                    if not t:
+                        await event.edit('⚠️ متن را بنویسید: متن به ویس سلام')
+                        return
+                    await event.edit('🎙 در حال ساخت ویس...')
+                    path = await vfeat.kira_tts(t)
+                    if path and os.path.exists(path):
+                        await self.client.send_file(event.chat_id, path, voice_note=True)
+                        try:
+                            await event.delete()
+                        except Exception:
+                            pass
+                        try:
+                            os.remove(path)
+                        except Exception:
+                            pass
+                    else:
+                        await event.edit('❌ TTS ناموفق')
+                    return
+                # ویس به متن
+                if (cmd == 'ویس' and args and args[0] == 'به' and len(args) >= 2 and args[1] == 'متن') or command_text in ('ویس به متن',):
+                    if not event.is_reply:
+                        await event.edit('⚠️ روی ویس ریپلای کنید')
+                        return
+                    rm = await event.get_reply_message()
+                    if not rm or not (rm.voice or rm.audio or rm.document):
+                        await event.edit('⚠️ پیام ویس/آهنگ نیست')
+                        return
+                    await event.edit('⏳ در حال تبدیل ویس به متن...')
+                    p = await self.client.download_media(rm, file=os.path.join(MEDIA_FOLDER, f'stt_{self.user_id}'))
+                    txt = await vfeat.kira_stt(p) if p else '❌ دانلود ناموفق'
+                    await event.edit(f'📝 {txt[:3500]}')
+                    try:
+                        if p:
+                            os.remove(p)
+                    except Exception:
+                        pass
+                    return
+                # رمزنگاری
+                if cmd in ('رمزنگاری', 'رمزنگار', 'رمز'):
+                    mode = 'emoji'
+                    if args and args[0] in ('عدد', 'عددی', 'number', 'num'):
+                        mode = 'num'
+                    elif args and args[0] in ('ایموجی', 'emoji'):
+                        mode = 'emoji'
+                    if not event.is_reply:
+                        await event.edit('⚠️ روی پیام متنی ریپلای کنید\nمثال: رمزنگاری ایموجی')
+                        return
+                    rm = await event.get_reply_message()
+                    plain = (rm.text or rm.message or '') if rm else ''
+                    if not plain:
+                        await event.edit('⚠️ پیام متنی نیست')
+                        return
+                    cipher = vfeat.encrypt_text(plain, mode=mode)
+                    await event.edit(cipher)
+                    return
+                if cmd in ('رمزگشایی', 'رمزگشا'):
+                    if not event.is_reply:
+                        await event.edit('⚠️ روی پیام رمزشده ریپلای کنید')
+                        return
+                    rm = await event.get_reply_message()
+                    cipher = (rm.text or rm.message or '') if rm else ''
+                    plain = vfeat.decrypt_text(cipher)
+                    await event.edit(f'🔓 {plain}')
+                    return
+                # QR
+                if cmd in ('کیوار', 'کیوآر', 'qr', 'QR'):
+                    data = ' '.join(args) if args else ''
+                    if not data and event.is_reply:
+                        rm = await event.get_reply_message()
+                        data = (rm.text or rm.message or '') if rm else ''
+                        if not data and rm and rm.media:
+                            # encode file id / link-ish
+                            data = f"media:{rm.id}:{event.chat_id}"
+                    if not data:
+                        await event.edit('⚠️ متن یا ریپلای لازم است')
+                        return
+                    path = vfeat.make_qr_image(data)
+                    await self.client.send_file(event.chat_id, path, caption='📱 QR')
+                    try:
+                        await event.delete()
+                    except Exception:
+                        pass
+                    try:
+                        os.remove(path)
+                    except Exception:
+                        pass
+                    return
+                if cmd == 'اسکن':
+                    if not event.is_reply:
+                        await event.edit('⚠️ روی عکس QR ریپلای کنید')
+                        return
+                    rm = await event.get_reply_message()
+                    p = await self.client.download_media(rm, file=os.path.join(MEDIA_FOLDER, f'qrscan_{self.user_id}'))
+                    if not p:
+                        await event.edit('❌ دانلود ناموفق')
+                        return
+                    res = vfeat.scan_qr_from_image(p)
+                    await event.edit(f'📷 نتیجه اسکن:\n<code>{res or "چیزی خوانده نشد (pyzbar/opencv لازم است)"}</code>', parse_mode='html')
+                    try:
+                        os.remove(p)
+                    except Exception:
+                        pass
+                    return
+                # ساعت جهانی
+                if cmd == 'ساعت' and args and args[0] == 'جهانی':
+                    await event.edit(vfeat.world_clock_text(), parse_mode='html')
+                    return
+                # ماشین حساب
+                if cmd == 'حساب' and args:
+                    await event.edit(vfeat.calc_expr(' '.join(args)), parse_mode='html')
+                    return
+                if cmd == 'نمودار' and args:
+                    expr = ' '.join(args)
+                    await event.edit('📊 در حال رسم...')
+                    path = vfeat.calc_graph_image(expr)
+                    if path:
+                        await self.client.send_file(event.chat_id, path, caption=f'y = {expr}')
+                        try:
+                            await event.delete()
+                        except Exception:
+                            pass
+                        try:
+                            os.remove(path)
+                        except Exception:
+                            pass
+                    else:
+                        await event.edit('❌ رسم نمودار ناموفق (matplotlib؟)')
+                    return
+                # آب و هوا
+                if cmd in ('آب', 'آب‌وهوا') or (cmd == 'آب' and args):
+                    city = ' '.join(args).replace('و هوا', '').replace('وهوا', '').strip() or 'تهران'
+                    if city in ('و', 'هوا'):
+                        city = 'تهران'
+                    await event.edit(await vfeat.get_weather(city), parse_mode='html')
+                    return
+                if command_text.startswith('آب و هوا') or command_text.startswith('آب‌وهوا'):
+                    city = command_text.replace('آب و هوا', '').replace('آب‌وهوا', '').strip() or 'تهران'
+                    await event.edit(await vfeat.get_weather(city), parse_mode='html')
+                    return
+                # ویکی
+                if cmd == 'ویکی' and args:
+                    await event.edit(await vfeat.wiki_search(' '.join(args)), parse_mode='html')
+                    return
+                # گیت‌هاب
+                if cmd in ('گیتهاب', 'گیت‌هاب') and args:
+                    await event.edit(await vfeat.github_user(args[0]), parse_mode='html')
+                    return
+                if cmd == 'دانلود' and args and args[0] in ('گیت', 'گیتهاب', 'github'):
+                    url = args[1] if len(args) > 1 else ''
+                    if not url and event.is_reply:
+                        rm = await event.get_reply_message()
+                        url = (rm.text or '') if rm else ''
+                    path, name = await vfeat.github_download_file(url.strip())
+                    if path:
+                        await self.client.send_file(event.chat_id, path, caption=f'🐙 {name}')
+                        try:
+                            await event.delete()
+                        except Exception:
+                            pass
+                        try:
+                            os.remove(path)
+                        except Exception:
+                            pass
+                    else:
+                        await event.edit(name)
+                    return
+                # سرچ برنامه/آهنگ/فیلم
+                if cmd == 'سرچ' and args:
+                    kind = 'app'
+                    q = ' '.join(args)
+                    if args[0] in ('برنامه', 'اپ', 'app'):
+                        kind = 'app'
+                        q = ' '.join(args[1:])
+                    elif args[0] in ('آهنگ', 'موزیک', 'music'):
+                        kind = 'music'
+                        q = ' '.join(args[1:])
+                    elif args[0] in ('فیلم', 'ویدیو', 'video'):
+                        kind = 'video'
+                        q = ' '.join(args[1:])
+                    if not q:
+                        await event.edit('⚠️ مثال: سرچ برنامه روبیکا')
+                        return
+                    await event.edit('🔎 در حال جستجو...')
+                    txt = await vfeat.search_app_or_media(q, kind)
+                    self.last_search_results = txt
+                    await event.edit(txt, parse_mode='html', link_preview=False)
+                    return
+                if cmd == 'لینک' and args and args[0] == 'بده':
+                    await event.edit(getattr(self, 'last_search_results', None) or '⚠️ اول سرچ کنید', parse_mode='html')
+                    return
+                # مدیا: ویس به آهنگ / تغییر صدا / ویدیو نوت / فیلتر / واترمارک
+                if event.is_reply and cmd in ('ویس', 'تغییر', 'ویدیو', 'فیلتر', 'واترمارک', 'پی\u200cدی\u200cاف', 'پی‌دی‌اف', 'متن'):
+                    rm = await event.get_reply_message()
+                    if cmd == 'ویس' and args and args[0] == 'به' and len(args) >= 2 and args[1] in ('آهنگ', 'موزیک'):
+                        await event.edit('⏳ تبدیل ویس به آهنگ...')
+                        p = await self.client.download_media(rm, file=os.path.join(MEDIA_FOLDER, f'v2m_{self.user_id}'))
+                        out = await vfeat.voice_to_audio_file(p, as_music=True) if p else None
+                        if out:
+                            await self.client.send_file(event.chat_id, out, caption='🎵')
+                            try:
+                                await event.delete()
+                            except Exception:
+                                pass
+                        else:
+                            await event.edit('❌ ناموفق')
+                        return
+                    if cmd == 'تغییر' and args and args[0] == 'صدا':
+                        await event.edit('⏳ تغییر صدا...')
+                        p = await self.client.download_media(rm, file=os.path.join(MEDIA_FOLDER, f'pitch_{self.user_id}'))
+                        out = await vfeat.change_voice_pitch(p) if p else None
+                        if out:
+                            await self.client.send_file(event.chat_id, out, voice_note=True)
+                            try:
+                                await event.delete()
+                            except Exception:
+                                pass
+                        else:
+                            await event.edit('❌ ناموفق')
+                        return
+                    if cmd == 'ویدیو' and args and args[0] in ('نوت', 'مسیج', 'گرد'):
+                        await event.edit('⏳ ساخت ویدیو نوت...')
+                        p = await self.client.download_media(rm, file=os.path.join(MEDIA_FOLDER, f'vnote_{self.user_id}'))
+                        out = await vfeat.video_to_note(p) if p else None
+                        if out:
+                            await self.client.send_file(event.chat_id, out, video_note=True)
+                            try:
+                                await event.delete()
+                            except Exception:
+                                pass
+                        else:
+                            await event.edit('❌ ناموفق (ffmpeg؟)')
+                        return
+                    if cmd == 'فیلتر':
+                        fname = args[0] if args else 'gray'
+                        await event.edit('⏳ فیلتر...')
+                        p = await self.client.download_media(rm, file=os.path.join(MEDIA_FOLDER, f'flt_{self.user_id}'))
+                        out = await vfeat.image_filter(p, fname) if p else None
+                        if out:
+                            await self.client.send_file(event.chat_id, out)
+                            try:
+                                await event.delete()
+                            except Exception:
+                                pass
+                        else:
+                            await event.edit('❌ ناموفق')
+                        return
+                    if cmd == 'واترمارک':
+                        wt = ' '.join(args) if args else 'VROOM'
+                        await event.edit('⏳ واترمارک...')
+                        p = await self.client.download_media(rm, file=os.path.join(MEDIA_FOLDER, f'wm_{self.user_id}'))
+                        out = await vfeat.add_watermark(p, wt) if p else None
+                        if out:
+                            await self.client.send_file(event.chat_id, out)
+                            try:
+                                await event.delete()
+                            except Exception:
+                                pass
+                        else:
+                            await event.edit('❌ ناموفق')
+                        return
+                    if cmd in ('پی\u200cدی\u200cاف', 'پی‌دی‌اف') or (cmd == 'پی' and args and 'دی' in ''.join(args)):
+                        await event.edit('⏳ PDF...')
+                        p = await self.client.download_media(rm, file=os.path.join(MEDIA_FOLDER, f'pdf_{self.user_id}'))
+                        out = await vfeat.photo_to_pdf([p]) if p else None
+                        if out:
+                            await self.client.send_file(event.chat_id, out)
+                            try:
+                                await event.delete()
+                            except Exception:
+                                pass
+                        else:
+                            await event.edit('❌ ناموفق')
+                        return
+                    if cmd == 'متن' and args and args[0] == 'روی':
+                        t = ' '.join(args[2:] if len(args) > 2 else args[1:])
+                        await event.edit('⏳ افزودن متن...')
+                        p = await self.client.download_media(rm, file=os.path.join(MEDIA_FOLDER, f'txtm_{self.user_id}'))
+                        out = await vfeat.text_on_gif_or_image(p, t or 'VROOM') if p else None
+                        if out:
+                            await self.client.send_file(event.chat_id, out)
+                            try:
+                                await event.delete()
+                            except Exception:
+                                pass
+                        else:
+                            await event.edit('❌ ناموفق')
+                        return
+                # اضافه فونت تایم
+                if cmd == 'اضافه' and args and args[0] == 'فونت':
+                    font_str = ''.join(args[1:]) if len(args) > 1 else ''
+                    ok, msg = vfeat.validate_font_digits(font_str)
+                    if not ok:
+                        await event.edit(f'❌ {msg}\nمثال: <code>اضافه فونت 𝟎𝟏𝟐𝟑𝟒𝟓𝟔𝟕𝟖𝟗</code>', parse_mode='html')
+                        return
+                    # ذخیره در classic_fonts runtime + settings
+                    try:
+                        classic_fonts.append(font_str)
+                        idx = len(classic_fonts) - 1
+                        db.update_selfbot_setting(self.user_id, 'time_font_indices', str(idx))
+                        self.time_font_indices = [idx]
+                        sample = vfeat.format_time_with_font(font_str)
+                        await event.edit(f'✅ فونت اضافه شد (ایندکس {idx})\nنمونه ساعت: {sample}')
+                    except Exception as e:
+                        await event.edit(f'❌ {e}')
+                    return
+                # حذف همه پیام‌های خود در چت فعلی
+                if command_text in ('حذف همه پیام', 'حذف همه پیام‌ها', 'حذف همه پیامها'):
+                    await event.edit('⏳ حذف پیام‌های شما...')
+                    n = 0
+                    async for m in self.client.iter_messages(event.chat_id, from_user='me', limit=500):
+                        try:
+                            await m.delete()
+                            n += 1
+                        except Exception:
+                            pass
+                    try:
+                        await self.client.send_message(event.chat_id, f'✅ {n} پیام حذف شد')
+                    except Exception:
+                        pass
+                    return
+            except Exception as _v5e:
+                logger.error(f'v5 features: {_v5e}\n{traceback.format_exc()}')
 
         # بن / انبن فقط ادمین
         if cmd in ('.بن', '.انبن', 'بن', 'انبن') or command_text.strip() in ('.بن', '.انبن'):
@@ -7039,19 +7485,14 @@ class SelfBotManager:
         font_info = "همه فونت‌ها" if self.time_font_indices == 'all' else f"فونت‌های {self.time_font_indices}"
         ai_status = settings.get('ai_status', {})
         active_ai_pm = "هیچ هوش فعالی در پی‌وی وجود ندارد"
-        if ai_status.get('ai_1_pm'):
-            active_ai_pm = "هوش ۱ (Gemini)"
-        elif ai_status.get('ai_2_pm'):
-            active_ai_pm = "هوش ۲ (Paxsenix API)"
-        elif ai_status.get('ai_3_pm'):
-            active_ai_pm = "هوش ۳ (DeepSeek)"
-        active_ai_group = "هیچ هوش فعالی در گروه وجود ندارد"
-        if ai_status.get('ai_1_group'):
-            active_ai_group = "هوش ۱ (Gemini)"
-        elif ai_status.get('ai_2_group'):
-            active_ai_group = "هوش ۲ (Paxsenix API)"
-        elif ai_status.get('ai_3_group'):
-            active_ai_group = "هوش ۳ (DeepSeek)"
+        if ai_status.get('ai_1_pm') or ai_status.get('ai_2_pm') or ai_status.get('ai_3_pm'):
+            active_ai_pm = "KiraAI (فعال در پیوی)"
+        else:
+            active_ai_pm = "هیچ هوش فعالی در پیوی وجود ندارد"
+        if ai_status.get('ai_1_group') or ai_status.get('ai_2_group') or ai_status.get('ai_3_group'):
+            active_ai_group = "KiraAI (فعال در گروه)"
+        else:
+            active_ai_group = "هیچ هوش فعالی در گروه وجود ندارد"
         filter_status = "فعال" if db.get_filter_enabled(self.user_id) else "غیرفعال"
         text_style = settings.get('text_style') or "هیچکدام"
         locked_pvs = db.get_locked_pvs(self.user_id)
@@ -7177,6 +7618,17 @@ class SelfBotManager:
                                 break
             except Exception as _le:
                 logger.debug(f"learning reply: {_le}")
+
+        # رمزگشایی خودکار پیام‌های رمزشده (اگر طرف مقابل سلف دارد و فرمت E/N باشد)
+        if not event.message.out and event.message.text and vfeat:
+            try:
+                txt = event.message.text.strip()
+                if vfeat.looks_encrypted(txt):
+                    plain = vfeat.decrypt_text(txt)
+                    if plain and plain != txt:
+                        await event.reply(f"🔓 رمزگشایی:\n{plain}")
+            except Exception as _de:
+                logger.debug(f"auto decrypt: {_de}")
         
         if isinstance(event.message.peer_id, PeerUser) and not event.message.out:
             if settings.get('pv_lock_all'):
@@ -9614,31 +10066,29 @@ def get_protection_menu_keyboard(user_id):
 
 def get_ai_menu_keyboard(user_id):
     settings = db.get_selfbot_settings(user_id)
-    ai = settings['ai_status']
+    ai = settings.get('ai_status') or {}
+    pm_on = bool(ai.get('ai_1_pm') or ai.get('ai_2_pm') or ai.get('ai_3_pm'))
+    gp_on = bool(ai.get('ai_1_group') or ai.get('ai_2_group') or ai.get('ai_3_group'))
     keyboard = [
         [
-            InlineKeyboardButton(f"🟢 پیوی ۱ {'' if not ai['ai_1_pm'] else '✓'}", callback_data=f"exec_ai_pm_1_{user_id}", style="success" if not ai['ai_1_pm'] else "primary"),
-            InlineKeyboardButton(f"🔵 پیوی ۲ {'' if not ai['ai_2_pm'] else '✓'}", callback_data=f"exec_ai_pm_2_{user_id}", style="success" if not ai['ai_2_pm'] else "primary"),
-            InlineKeyboardButton(f"🟣 پیوی ۳ {'' if not ai['ai_3_pm'] else '✓'}", callback_data=f"exec_ai_pm_3_{user_id}", style="success" if not ai['ai_3_pm'] else "primary")
+            InlineKeyboardButton(f"{'✓ ' if pm_on else ''}🤖 KiraAI پیوی", callback_data=f"exec_ai_pm_1_{user_id}", style="success" if pm_on else "primary"),
+            InlineKeyboardButton(f"{'✓ ' if gp_on else ''}🤖 KiraAI گروه", callback_data=f"exec_ai_group_1_{user_id}", style="success" if gp_on else "primary"),
         ],
         [
-            InlineKeyboardButton("⚫ خاموش پیوی", callback_data=f"exec_ai_pm_off_{user_id}", style="danger")
+            InlineKeyboardButton("⚫ خاموش پیوی", callback_data=f"exec_ai_pm_off_{user_id}", style="danger"),
+            InlineKeyboardButton("⚫ خاموش گروه", callback_data=f"exec_ai_group_off_{user_id}", style="danger"),
         ],
         [
-            InlineKeyboardButton(f"🟢 گروه ۱ {'' if not ai['ai_1_group'] else '✓'}", callback_data=f"exec_ai_group_1_{user_id}", style="success" if not ai['ai_1_group'] else "primary"),
-            InlineKeyboardButton(f"🔵 گروه ۲ {'' if not ai['ai_2_group'] else '✓'}", callback_data=f"exec_ai_group_2_{user_id}", style="success" if not ai['ai_2_group'] else "primary"),
-            InlineKeyboardButton(f"🟣 گروه ۳ {'' if not ai['ai_3_group'] else '✓'}", callback_data=f"exec_ai_group_3_{user_id}", style="success" if not ai['ai_3_group'] else "primary")
+            InlineKeyboardButton("🎨 ساخت عکس", callback_data=f"exec_kira_img_help_{user_id}", style="primary"),
+            InlineKeyboardButton("🎙 متن↔ویس", callback_data=f"exec_kira_voice_help_{user_id}", style="primary"),
         ],
         [
-            InlineKeyboardButton("⚫ خاموش گروه", callback_data=f"exec_ai_group_off_{user_id}", style="danger")
-        ],
-        
-        [
-            InlineKeyboardButton("📖 راهنما", callback_data=f"exec_ai_help_{user_id}", style="primary")
+            InlineKeyboardButton("💬 چت: هوش [متن]", callback_data=f"exec_kira_chat_help_{user_id}", style="primary"),
         ],
         [
-            InlineKeyboardButton("⚈ بازگشت", callback_data=f"back_main", style="danger")
-        ]
+            InlineKeyboardButton("📖 راهنما", callback_data=f"exec_ai_help_{user_id}", style="primary"),
+            InlineKeyboardButton("⚈ بازگشت", callback_data=f"back_main", style="danger"),
+        ],
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -11238,15 +11688,18 @@ OCR روی عکس (ریپلای)
 › 🛡️ اسپم روشن/خاموش — محافظت در برابر اسپم دیگران.
 › ⚙️ تنظیم اسپم [تعداد] [ثانیه] — محدودیت و زمان میوت.
 › 📊 وضعیت اسپم — تنظیمات فعلی.""",
-        'ai_help': """📖 راهنمای هوش مصنوعی
+        'ai_help': """📖 راهنمای هوش مصنوعی (KiraAI)
 
-پیوی ۱/۲/۳ و گروه ۱/۲/۳:
-› ۱ = Gemini
-› ۲ = Paxsenix
-› ۳ = DeepSeek
+› فقط موتور KiraAI فعال است: https://kiraai.vn/
 
-با روشن کردن، پیام‌های دریافتی در آن محیط با AI پاسخ داده می‌شوند.
-› خاموش پیوی / خاموش گروه همه را قطع می‌کند.""",
+دستورات:
+• هوش [متن] — گفتگو
+• ساخت عکس [توضیح] — تولید تصویر
+• متن به ویس [متن] — تبدیل متن به صدا
+• ریپلای ویس + ویس به متن — تبدیل صدا به متن
+
+› KiraAI پیوی / گروه — پاسخ خودکار به پیام‌های دریافتی
+› خاموش پیوی / خاموش گروه — قطع پاسخ خودکار""",
         'report_help': """📖 راهنمای گزارش
 
 › 📍 تنظیم گزارش — گروه گزارش را تنظیم می‌کند.
@@ -11830,6 +12283,31 @@ OCR روی عکس (ریپلای)
         except Exception:
             try:
                 await context.bot.send_message(chat_id=chat_id, text=help_txt, reply_markup=get_tools_menu_keyboard(user_id))
+            except Exception:
+                pass
+        return
+
+    if cmd in ('kira_img_help', 'kira_voice_help', 'kira_chat_help'):
+        helps = {
+            'kira_img_help': "🎨 ساخت عکس با KiraAI\n\nدر سلف بنویسید:\n<code>ساخت عکس یک گربه فضانورد</code>",
+            'kira_voice_help': "🎙 متن ↔ ویس\n\n• <code>متن به ویس سلام چطوری</code>\n• ریپلای روی ویس + <code>ویس به متن</code>",
+            'kira_chat_help': "💬 چت KiraAI\n\n<code>هوش یک جوک بگو</code>\n\nپاسخ خودکار: از منوی هوش، KiraAI پیوی/گروه را روشن کنید.",
+        }
+        try:
+            if msg:
+                await msg.delete()
+        except Exception:
+            pass
+        try:
+            await safe_edit_panel(
+                query,
+                helps.get(cmd, "KiraAI"),
+                reply_markup=get_ai_menu_keyboard(user_id),
+                parse_mode='HTML',
+            )
+        except Exception:
+            try:
+                await context.bot.send_message(chat_id=chat_id, text=helps.get(cmd, "KiraAI"), parse_mode='HTML')
             except Exception:
                 pass
         return
@@ -12513,11 +12991,42 @@ async def admin_backup_db_handler(update: Update, context: ContextTypes.DEFAULT_
     if user_id != ADMIN_ID:
         await query.edit_message_text("⛔ دسترسی غیرمجاز")
         return
-    await query.edit_message_text("⏳ در حال آماده‌سازی بکاپ دیتابیس‌ها...")
+    await query.edit_message_text("⏳ پاکسازی کاربران بدون سشن + آماده‌سازی بکاپ...")
     try:
         import shutil
         import zipfile
         from datetime import datetime as dt
+        # پاکسازی: کاربرانی که سلف را حذف کرده‌اند / فایل سشن ندارند → self_active=0
+        cleaned = 0
+        try:
+            for u in (db.get_all_users() or []):
+                uid = str(u.get('user_id') or '')
+                if not uid:
+                    continue
+                sf = u.get('session_file')
+                has_sess = bool(sf and (os.path.exists(str(sf)) or os.path.exists(str(sf) + '.session')))
+                if not has_sess:
+                    alt = find_session_file(uid)
+                    if alt:
+                        try:
+                            db.update_user(uid, session_file=alt)
+                        except Exception:
+                            pass
+                        has_sess = True
+                if not has_sess and u.get('self_active'):
+                    try:
+                        db.update_user(uid, self_active=0)
+                        cleaned += 1
+                        if uid in selfbot_managers:
+                            try:
+                                await selfbot_managers[uid].stop()
+                            except Exception:
+                                pass
+                            selfbot_managers.pop(uid, None)
+                    except Exception:
+                        pass
+        except Exception as _ce:
+            logger.error(f"cleanup before backup: {_ce}")
         ts = dt.now().strftime("%Y%m%d_%H%M%S")
         backup_dir = f"backup_{ts}"
         os.makedirs(backup_dir, exist_ok=True)
@@ -12564,7 +13073,11 @@ async def admin_backup_db_handler(update: Update, context: ContextTypes.DEFAULT_
             os.remove(zip_name)
         except:
             pass
-        await query.edit_message_text(f"✅ بکاپ ارسال شد.\nتعداد فایل: {len(files_copied)}")
+        await query.edit_message_text(
+            f"✅ بکاپ ارسال شد.\n"
+            f"📁 فایل‌ها: {len(files_copied)}\n"
+            f"🧹 کاربران بدون سشن غیرفعال‌شده: {cleaned}"
+        )
     except Exception as e:
         logger.error(f"backup error: {e}")
         await query.edit_message_text(f"❌ خطا در بکاپ: {e}")
