@@ -100,7 +100,7 @@ def home():
     return jsonify({
         "status": "running",
         "bot": "VROOM",
-        "version": "4.9.7"
+        "version": "4.9.6"
     })
 
 @flask_app.route('/health')
@@ -126,17 +126,11 @@ GOOGLE_SEARCH_API_KEY = "AIzaSyCMYOU0NpU5xfu7GrffyywVUugd1yD2uDU"
 GOOGLE_CSE_ID = "3185e48756dfd482f"
 GOOGLE_SEARCH_URL = "https://www.googleapis.com/customsearch/v1"
 
-# ========== Kira AI (جایگزین کامل Gemini / Paxsenix / DeepSeek) ==========
-KIRA_API_KEY = "kira_502f0e75e02809860eb57ffa7c0894fe"
-KIRA_BASE_URL = "https://kiraai.vn/api/v1"
-KIRA_CHAT_URL = f"{KIRA_BASE_URL}/chat/completions"
-KIRA_IMAGE_URL = f"{KIRA_BASE_URL}/images/generations"
-KIRA_TTS_URL = f"{KIRA_BASE_URL}/audio/speech"
-KIRA_STT_URL = f"{KIRA_BASE_URL}/audio/transcriptions"
-KIRA_CHAT_MODEL = "kira-3.5-flash"
-KIRA_IMAGE_MODEL = "kira-image-3.0"
-KIRA_TTS_MODEL = "tts-1"
-KIRA_STT_MODEL = "whisper-1"
+GEMINI_KEY = "AIzaSyBhlSytH4Zfe-ww1D8HsrgJfCf5TRY1SLc"
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+PAXSENIX_API_KEY = "sk-paxsenix-Xo_BAFNGgWVZ_ymWd02Rk1JHbyoDSEzfPhiolJ3F12cY6XZG"
+PAXSENIX_API_URL = "https://api.paxsenix.org/v1/chat/completions"
+DEEPSEEK_FREE_URL = "https://deepseek.api-sina-free.workers.dev/?text="
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -961,7 +955,7 @@ SPAM_MESSAGES = [
     "کص ننت تو فروشگاه تنگستن کس داد، تنگستن کس شد و شکست",
 ]
 
-BOT_VERSION = "4.9.7"
+BOT_VERSION = "4.9.6"
 BOT_CREATOR = "VROOM"
 PANEL_HEADER_IMAGE = "panel_header.png"  # تصویر بالای پنل (تصویر جدید VROOM)
 
@@ -2767,117 +2761,34 @@ def convert_to_classic_font(text, font_index):
                 result.append(c)
         return ''.join(result)
 
-async def get_ai_response(text, ai_type=1, user_id=None):
-    """پاسخ چت با Kira AI (OpenAI-compatible). ai_type برای سازگاری نگه داشته شده."""
+async def get_ai_response(text, ai_type, user_id=None):
     try:
-        headers = {
-            "Authorization": f"Bearer {KIRA_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        data = {
-            "model": KIRA_CHAT_MODEL,
-            "messages": [{"role": "user", "content": text}],
-            "temperature": 0.7,
-            "max_tokens": 2048
-        }
-        response = requests.post(KIRA_CHAT_URL, headers=headers, json=data, timeout=60)
-        if response.status_code == 200:
-            result = response.json()
-            if "choices" in result and result["choices"]:
-                return result["choices"][0]["message"]["content"].strip()
-            if "error" in result:
-                logger.error(f"Kira chat error: {result.get('error')}")
-        else:
-            logger.error(f"Kira chat HTTP {response.status_code}: {response.text[:300]}")
-    except Exception as e:
-        logger.error(f"get_ai_response: {e}")
+        if ai_type == 1:
+            url = f"{GEMINI_URL}?key={GEMINI_KEY}"
+            payload = {"contents": [{"parts": [{"text": text}]}]}
+            response = requests.post(url, json=payload, timeout=30)
+            if response.status_code == 200:
+                result = response.json()
+                if 'candidates' in result:
+                    return result['candidates'][0]['content']['parts'][0]['text'].strip()
+        elif ai_type == 2:
+            headers = {'Authorization': f'Bearer {PAXSENIX_API_KEY}', 'Content-Type': 'application/json'}
+            data = {'model': 'gpt-3.5-turbo', 'messages': [{'role': 'user', 'content': text}]}
+            response = requests.post(PAXSENIX_API_URL, headers=headers, json=data, timeout=30)
+            if response.status_code == 200:
+                result = response.json()
+                if 'choices' in result:
+                    return result['choices'][0]['message']['content'].strip()
+        elif ai_type == 3:
+            response = requests.get(DEEPSEEK_FREE_URL + quote(text), timeout=30)
+            if response.status_code == 200:
+                return response.text.strip()
+    except:
+        pass
     return None
 
 
-async def kira_generate_image(prompt: str) -> str:
-    """ساخت تصویر با Kira — مسیر فایل PNG یا None"""
-    try:
-        headers = {
-            "Authorization": f"Bearer {KIRA_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        data = {
-            "model": KIRA_IMAGE_MODEL,
-            "prompt": prompt,
-            "n": 1,
-            "size": "1024x1024"
-        }
-        response = requests.post(KIRA_IMAGE_URL, headers=headers, json=data, timeout=120)
-        if response.status_code != 200:
-            logger.error(f"Kira image HTTP {response.status_code}: {response.text[:400]}")
-            return None
-        result = response.json()
-        items = result.get("data") or []
-        if not items:
-            logger.error(f"Kira image empty: {result}")
-            return None
-        item = items[0]
-        import tempfile, time as _t
-        out = os.path.join(tempfile.gettempdir(), f"kira_img_{int(_t.time()*1000)}.png")
-        if item.get("b64_json"):
-            with open(out, "wb") as f:
-                f.write(base64.b64decode(item["b64_json"]))
-            return out
-        if item.get("url"):
-            r = requests.get(item["url"], timeout=60)
-            if r.status_code == 200:
-                with open(out, "wb") as f:
-                    f.write(r.content)
-                return out
-        return None
-    except Exception as e:
-        logger.error(f"kira_generate_image: {e}")
-        return None
-
-
-async def kira_text_to_speech(text: str, voice: str = "alloy") -> str:
-    """متن به ویس — مسیر فایل mp3 یا None"""
-    try:
-        headers = {
-            "Authorization": f"Bearer {KIRA_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        data = {
-            "model": KIRA_TTS_MODEL,
-            "input": text[:4000],
-            "voice": voice
-        }
-        response = requests.post(KIRA_TTS_URL, headers=headers, json=data, timeout=90)
-        if response.status_code != 200:
-            logger.error(f"Kira TTS HTTP {response.status_code}: {response.text[:300]}")
-            return None
-        import tempfile, time as _t
-        out = os.path.join(tempfile.gettempdir(), f"kira_tts_{int(_t.time()*1000)}.mp3")
-        with open(out, "wb") as f:
-            f.write(response.content)
-        return out
-    except Exception as e:
-        logger.error(f"kira_text_to_speech: {e}")
-        return None
-
-
-async def kira_speech_to_text(audio_path: str) -> str:
-    """ویس به متن"""
-    try:
-        headers = {"Authorization": f"Bearer {KIRA_API_KEY}"}
-        with open(audio_path, "rb") as af:
-            files = {"file": (os.path.basename(audio_path), af, "audio/mpeg")}
-            data = {"model": KIRA_STT_MODEL}
-            response = requests.post(KIRA_STT_URL, headers=headers, files=files, data=data, timeout=90)
-        if response.status_code == 200:
-            result = response.json()
-            return (result.get("text") or "").strip()
-        logger.error(f"Kira STT HTTP {response.status_code}: {response.text[:300]}")
-    except Exception as e:
-        logger.error(f"kira_speech_to_text: {e}")
-    return None
-
-
+# ریشه‌های دستور (فقط تطبیق دقیق کلمه اول — نه پیشوند داخل متن)
 COMMAND_ROOTS = {
     'لیست', 'شروع', 'تایم', 'قلب', 'ماه', 'اطلاعات', 'دانلود', 'تاریخ', 'فعال', 'غیرفعال',
     'حذف', 'ست', 'بولد', 'زیرخط', 'خط', 'نقل', 'اسپویلر', 'کج', 'کد', 'پیش', 'اسپم', 'بلاک',
@@ -2890,7 +2801,7 @@ COMMAND_ROOTS = {
     'یادگیری', 'بکاپ', 'بکاب', 'اتمام', 'فال', 'اطلاعات', '.بن', '.انبن', 'بن', 'انبن', 'دارت', 'بسکتبال', 'فوتبال', '.بن', '.انبن', 'بن', 'انبن',
     'یوزرنیم',
     'یوزنیم', 'ایدی', 'آیدی', 'آیدی\u200cعددی', 'ایدی\u200cعددی', 'username', 'id',
-    'فیلتر', 'ویس', 'صدا', 'ویدیوبهویس', 'ویدیو_به_ویس', 'کیرا', 'هوش', 'عکس',
+    'فیلتر', 'ویس', 'صدا', 'ویدیوبهویس', 'ویدیو_به_ویس',
 }
 
 def is_bot_command_text(text: str) -> bool:
@@ -5377,17 +5288,17 @@ class SelfBotManager:
                 ai_status['ai_1_pm'] = True
                 ai_status['ai_2_pm'] = False
                 ai_status['ai_3_pm'] = False
-                message = '✅ Kira AI در پی‌وی روشن شد'
+                message = '✅ هوش ۱ (Gemini) در پی‌وی روشن شد'
             elif ai_num == 2:
                 ai_status['ai_1_pm'] = False
                 ai_status['ai_2_pm'] = True
                 ai_status['ai_3_pm'] = False
-                message = '✅ Kira AI در پی‌وی روشن شد'
+                message = '✅ هوش ۲ (Paxsenix) در پی‌وی روشن شد'
             else:
                 ai_status['ai_1_pm'] = False
                 ai_status['ai_2_pm'] = False
                 ai_status['ai_3_pm'] = True
-                message = '✅ Kira AI در پی‌وی روشن شد'
+                message = '✅ هوش ۳ (DeepSeek) در پی‌وی روشن شد'
             db.update_ai_status(self.user_id, ai_status)
             await event.edit(message)
             return
@@ -5448,17 +5359,17 @@ class SelfBotManager:
                 ai_status['ai_1_group'] = True
                 ai_status['ai_2_group'] = False
                 ai_status['ai_3_group'] = False
-                message = '✅ Kira AI در گروه روشن شد'
+                message = '✅ هوش ۱ (Gemini) در گروه روشن شد'
             elif ai_num == 2:
                 ai_status['ai_1_group'] = False
                 ai_status['ai_2_group'] = True
                 ai_status['ai_3_group'] = False
-                message = '✅ Kira AI در گروه روشن شد'
+                message = '✅ هوش ۲ (Paxsenix) در گروه روشن شد'
             else:
                 ai_status['ai_1_group'] = False
                 ai_status['ai_2_group'] = False
                 ai_status['ai_3_group'] = True
-                message = '✅ Kira AI در گروه روشن شد'
+                message = '✅ هوش ۳ (DeepSeek) در گروه روشن شد'
             db.update_ai_status(self.user_id, ai_status)
             await event.edit(message)
             return
@@ -7127,8 +7038,20 @@ class SelfBotManager:
         spam_messages = len(db.get_enemy_spam_messages(self.user_id))
         font_info = "همه فونت‌ها" if self.time_font_indices == 'all' else f"فونت‌های {self.time_font_indices}"
         ai_status = settings.get('ai_status', {})
-        active_ai_pm = "Kira AI (پاسخ خودکار پیوی)" if ai_status.get('ai_1_pm') else "خاموش"
-        active_ai_group = "Kira AI (پاسخ خودکار گروه)" if ai_status.get('ai_1_group') else "خاموش"
+        active_ai_pm = "هیچ هوش فعالی در پی‌وی وجود ندارد"
+        if ai_status.get('ai_1_pm'):
+            active_ai_pm = "هوش ۱ (Gemini)"
+        elif ai_status.get('ai_2_pm'):
+            active_ai_pm = "هوش ۲ (Paxsenix API)"
+        elif ai_status.get('ai_3_pm'):
+            active_ai_pm = "هوش ۳ (DeepSeek)"
+        active_ai_group = "هیچ هوش فعالی در گروه وجود ندارد"
+        if ai_status.get('ai_1_group'):
+            active_ai_group = "هوش ۱ (Gemini)"
+        elif ai_status.get('ai_2_group'):
+            active_ai_group = "هوش ۲ (Paxsenix API)"
+        elif ai_status.get('ai_3_group'):
+            active_ai_group = "هوش ۳ (DeepSeek)"
         filter_status = "فعال" if db.get_filter_enabled(self.user_id) else "غیرفعال"
         text_style = settings.get('text_style') or "هیچکدام"
         locked_pvs = db.get_locked_pvs(self.user_id)
@@ -7390,9 +7313,15 @@ class SelfBotManager:
             ai_active = False
             ai_type = None
             if event.message.text:
-                if ai_status.get('ai_1_pm') or ai_status.get('ai_2_pm') or ai_status.get('ai_3_pm'):
+                if ai_status.get('ai_1_pm'):
                     ai_active = True
-                    ai_type = 1  # فقط Kira
+                    ai_type = 1
+                elif ai_status.get('ai_2_pm'):
+                    ai_active = True
+                    ai_type = 2
+                elif ai_status.get('ai_3_pm'):
+                    ai_active = True
+                    ai_type = 3
             if ai_active and ai_type:
                 try:
                     await self.client(SetTypingRequest(event.chat_id, types.SendMessageTypingAction()))
@@ -9685,27 +9614,25 @@ def get_protection_menu_keyboard(user_id):
 
 def get_ai_menu_keyboard(user_id):
     settings = db.get_selfbot_settings(user_id)
-    ai = settings.get('ai_status') or {}
-    # فقط Kira: از ai_1_pm / ai_1_group استفاده می‌کنیم
-    pm_on = bool(ai.get('ai_1_pm'))
-    group_on = bool(ai.get('ai_1_group'))
+    ai = settings['ai_status']
     keyboard = [
         [
-            InlineKeyboardButton(f"🤖 پاسخ خودکار پیوی {'✓' if pm_on else ''}", callback_data=f"exec_ai_pm_1_{user_id}", style="success" if not pm_on else "primary"),
-            InlineKeyboardButton(f"🤖 پاسخ خودکار گروه {'✓' if group_on else ''}", callback_data=f"exec_ai_group_1_{user_id}", style="success" if not group_on else "primary"),
+            InlineKeyboardButton(f"🟢 پیوی ۱ {'' if not ai['ai_1_pm'] else '✓'}", callback_data=f"exec_ai_pm_1_{user_id}", style="success" if not ai['ai_1_pm'] else "primary"),
+            InlineKeyboardButton(f"🔵 پیوی ۲ {'' if not ai['ai_2_pm'] else '✓'}", callback_data=f"exec_ai_pm_2_{user_id}", style="success" if not ai['ai_2_pm'] else "primary"),
+            InlineKeyboardButton(f"🟣 پیوی ۳ {'' if not ai['ai_3_pm'] else '✓'}", callback_data=f"exec_ai_pm_3_{user_id}", style="success" if not ai['ai_3_pm'] else "primary")
         ],
         [
-            InlineKeyboardButton("⚫ خاموش پیوی", callback_data=f"exec_ai_pm_off_{user_id}", style="danger"),
-            InlineKeyboardButton("⚫ خاموش گروه", callback_data=f"exec_ai_group_off_{user_id}", style="danger"),
+            InlineKeyboardButton("⚫ خاموش پیوی", callback_data=f"exec_ai_pm_off_{user_id}", style="danger")
         ],
         [
-            InlineKeyboardButton("🖼 ساخت عکس", callback_data=f"exec_ai_image_{user_id}", style="primary"),
-            InlineKeyboardButton("🔊 متن → ویس", callback_data=f"exec_ai_tts_{user_id}", style="primary"),
+            InlineKeyboardButton(f"🟢 گروه ۱ {'' if not ai['ai_1_group'] else '✓'}", callback_data=f"exec_ai_group_1_{user_id}", style="success" if not ai['ai_1_group'] else "primary"),
+            InlineKeyboardButton(f"🔵 گروه ۲ {'' if not ai['ai_2_group'] else '✓'}", callback_data=f"exec_ai_group_2_{user_id}", style="success" if not ai['ai_2_group'] else "primary"),
+            InlineKeyboardButton(f"🟣 گروه ۳ {'' if not ai['ai_3_group'] else '✓'}", callback_data=f"exec_ai_group_3_{user_id}", style="success" if not ai['ai_3_group'] else "primary")
         ],
         [
-            InlineKeyboardButton("🎙 ویس → متن", callback_data=f"exec_ai_stt_{user_id}", style="primary"),
-            InlineKeyboardButton("💬 چت با Kira", callback_data=f"exec_ai_chat_{user_id}", style="primary"),
+            InlineKeyboardButton("⚫ خاموش گروه", callback_data=f"exec_ai_group_off_{user_id}", style="danger")
         ],
+        
         [
             InlineKeyboardButton("📖 راهنما", callback_data=f"exec_ai_help_{user_id}", style="primary")
         ],
@@ -11311,29 +11238,15 @@ OCR روی عکس (ریپلای)
 › 🛡️ اسپم روشن/خاموش — محافظت در برابر اسپم دیگران.
 › ⚙️ تنظیم اسپم [تعداد] [ثانیه] — محدودیت و زمان میوت.
 › 📊 وضعیت اسپم — تنظیمات فعلی.""",
-        'ai_help': """📖 راهنمای هوش مصنوعی (Kira AI)
+        'ai_help': """📖 راهنمای هوش مصنوعی
 
-🤖 پاسخ خودکار پیوی / گروه
-با روشن کردن، پیام‌های دریافتی با Kira AI پاسخ داده می‌شوند.
+پیوی ۱/۲/۳ و گروه ۱/۲/۳:
+› ۱ = Gemini
+› ۲ = Paxsenix
+› ۳ = DeepSeek
 
-🖼 ساخت عکس
-در سلف بنویسید:
-ساخت عکس [توضیح تصویر]
-یا: عکس [توضیح]
-
-🔊 متن → ویس
-متن به ویس [متن]
-یا ریپلای روی متن + ویس
-
-🎙 ویس → متن
-ریپلای روی ویس + متن
-یا: ویس به متن
-
-💬 چت مستقیم
-کیرا [سوال]
-یا: هوش [سوال]
-
-توکن و سرویس: kiraai.vn""",
+با روشن کردن، پیام‌های دریافتی در آن محیط با AI پاسخ داده می‌شوند.
+› خاموش پیوی / خاموش گروه همه را قطع می‌کند.""",
         'report_help': """📖 راهنمای گزارش
 
 › 📍 تنظیم گزارش — گروه گزارش را تنظیم می‌کند.
@@ -12033,14 +11946,14 @@ OCR روی عکس (ریپلای)
             return
     
     ai_commands = {
-        'ai_pm_1': {'ai_1_pm': True, 'ai_2_pm': False, 'ai_3_pm': False, 'msg': 'Kira AI در پی‌وی روشن شد'},
-        'ai_pm_2': {'ai_1_pm': True, 'ai_2_pm': False, 'ai_3_pm': False, 'msg': 'Kira AI در پی‌وی روشن شد'},
-        'ai_pm_3': {'ai_1_pm': True, 'ai_2_pm': False, 'ai_3_pm': False, 'msg': 'Kira AI در پی‌وی روشن شد'},
-        'ai_pm_off': {'ai_1_pm': False, 'ai_2_pm': False, 'ai_3_pm': False, 'msg': 'هوش مصنوعی پی‌وی خاموش شد'},
-        'ai_group_1': {'ai_1_group': True, 'ai_2_group': False, 'ai_3_group': False, 'msg': 'Kira AI در گروه روشن شد'},
-        'ai_group_2': {'ai_1_group': True, 'ai_2_group': False, 'ai_3_group': False, 'msg': 'Kira AI در گروه روشن شد'},
-        'ai_group_3': {'ai_1_group': True, 'ai_2_group': False, 'ai_3_group': False, 'msg': 'Kira AI در گروه روشن شد'},
-        'ai_group_off': {'ai_1_group': False, 'ai_2_group': False, 'ai_3_group': False, 'msg': 'هوش مصنوعی گروه خاموش شد'}
+        'ai_pm_1': {'ai_1_pm': True, 'ai_2_pm': False, 'ai_3_pm': False, 'msg': 'هوش ۱ (Gemini) در پی‌وی روشن شد'},
+        'ai_pm_2': {'ai_1_pm': False, 'ai_2_pm': True, 'ai_3_pm': False, 'msg': 'هوش ۲ (Paxsenix) در پی‌وی روشن شد'},
+        'ai_pm_3': {'ai_1_pm': False, 'ai_2_pm': False, 'ai_3_pm': True, 'msg': 'هوش ۳ (DeepSeek) در پی‌وی روشن شد'},
+        'ai_pm_off': {'ai_1_pm': False, 'ai_2_pm': False, 'ai_3_pm': False, 'msg': 'همه هوش‌ها در پی‌وی خاموش شدند'},
+        'ai_group_1': {'ai_1_group': True, 'ai_2_group': False, 'ai_3_group': False, 'msg': 'هوش ۱ (Gemini) در گروه روشن شد'},
+        'ai_group_2': {'ai_1_group': False, 'ai_2_group': True, 'ai_3_group': False, 'msg': 'هوش ۲ (Paxsenix) در گروه روشن شد'},
+        'ai_group_3': {'ai_1_group': False, 'ai_2_group': False, 'ai_3_group': True, 'msg': 'هوش ۳ (DeepSeek) در گروه روشن شد'},
+        'ai_group_off': {'ai_1_group': False, 'ai_2_group': False, 'ai_3_group': False, 'msg': 'همه هوش‌ها در گروه خاموش شدند'}
     }
     for cmd_prefix, ai_data in ai_commands.items():
         if cmd.startswith(cmd_prefix):
@@ -12163,57 +12076,6 @@ OCR روی عکس (ریپلای)
             except Exception:
                 pass
         return
-    # ——— Kira AI ابزارها ———
-    if cmd == 'ai_image':
-        help_txt = (
-            "🖼 ساخت عکس با Kira AI\n\n"
-            "در چت سلف بنویسید:\n"
-            "• ساخت عکس یک گربه سایبرپانک\n"
-            "• عکس منظره کوه در مه\n\n"
-            "چند ثانیه صبر کنید تا تصویر ساخته شود."
-        )
-        try:
-            await safe_edit_panel(query, help_txt, reply_markup=get_ai_menu_keyboard(user_id))
-        except Exception:
-            try:
-                await context.bot.send_message(chat_id=chat_id, text=help_txt)
-            except Exception:
-                pass
-        return
-    if cmd == 'ai_tts':
-        help_txt = (
-            "🔊 متن به ویس (Kira TTS)\n\n"
-            "• متن به ویس سلام خوبی؟\n"
-            "• یا ریپلای روی یک متن + بنویس: ویس"
-        )
-        try:
-            await safe_edit_panel(query, help_txt, reply_markup=get_ai_menu_keyboard(user_id))
-        except Exception:
-            pass
-        return
-    if cmd == 'ai_stt':
-        help_txt = (
-            "🎙 ویس به متن (Kira STT)\n\n"
-            "روی یک ویس ریپلای کنید و بنویسید:\n"
-            "• متن\n• ویس به متن\n• تبدیل ویس"
-        )
-        try:
-            await safe_edit_panel(query, help_txt, reply_markup=get_ai_menu_keyboard(user_id))
-        except Exception:
-            pass
-        return
-    if cmd == 'ai_chat':
-        help_txt = (
-            "💬 چت مستقیم با Kira\n\n"
-            "• کیرا آب و هوای تهران چطوره؟\n"
-            "• هوش یک شعر کوتاه بنویس"
-        )
-        try:
-            await safe_edit_panel(query, help_txt, reply_markup=get_ai_menu_keyboard(user_id))
-        except Exception:
-            pass
-        return
-
     if cmd == 'crypto_help':
         help_txt = (
             "📖 راهنمای ارزها\n\n"
@@ -13152,7 +13014,7 @@ async def main():
     except Exception as e:
         print(f"⚠️ پنل image: {e}")
     print("=" * 60)
-    print("🤖 Self-Bot System v4.9.7 (Kira AI)")
+    print("🤖 Self-Bot System v4.9.6")
     print(f"👑 ادمین: {ADMIN_ID}")
     print(f"📁 پوشه سشن‌ها: {SESSIONS_FOLDER}")
     print("=" * 60)
