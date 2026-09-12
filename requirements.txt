@@ -12,11 +12,3 @@ Pillow
 psutil
 persiantools
 currency-converter
-imageio-ffmpeg
-numpy
-matplotlib
-opencv-python
-pyzbar
-openai
-SpeechRecognition
-pydub
