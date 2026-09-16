@@ -100,7 +100,7 @@ def home():
     return jsonify({
         "status": "running",
         "bot": "VROOM",
-        "version": "4.9.6"
+        "version": "5.0.0"
     })
 
 @flask_app.route('/health')
@@ -126,11 +126,17 @@ GOOGLE_SEARCH_API_KEY = "AIzaSyCMYOU0NpU5xfu7GrffyywVUugd1yD2uDU"
 GOOGLE_CSE_ID = "3185e48756dfd482f"
 GOOGLE_SEARCH_URL = "https://www.googleapis.com/customsearch/v1"
 
-GEMINI_KEY = "AIzaSyBhlSytH4Zfe-ww1D8HsrgJfCf5TRY1SLc"
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
-PAXSENIX_API_KEY = "sk-paxsenix-Xo_BAFNGgWVZ_ymWd02Rk1JHbyoDSEzfPhiolJ3F12cY6XZG"
-PAXSENIX_API_URL = "https://api.paxsenix.org/v1/chat/completions"
-DEEPSEEK_FREE_URL = "https://deepseek.api-sina-free.workers.dev/?text="
+# ========== Kira AI (جایگزین کامل Gemini / Paxsenix / DeepSeek) ==========
+KIRA_API_KEY = "kira_502f0e75e02809860eb57ffa7c0894fe"
+KIRA_BASE_URL = "https://kiraai.vn/api/v1"
+KIRA_CHAT_URL = f"{KIRA_BASE_URL}/chat/completions"
+KIRA_IMAGE_URL = f"{KIRA_BASE_URL}/images/generations"
+KIRA_TTS_URL = f"{KIRA_BASE_URL}/audio/speech"
+KIRA_STT_URL = f"{KIRA_BASE_URL}/audio/transcriptions"
+KIRA_CHAT_MODEL = "kira-3.5-flash"
+KIRA_IMAGE_MODEL = "kira-image-3.0"
+KIRA_TTS_MODEL = "tts-1"
+KIRA_STT_MODEL = "whisper-1"
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -955,7 +961,7 @@ SPAM_MESSAGES = [
     "کص ننت تو فروشگاه تنگستن کس داد، تنگستن کس شد و شکست",
 ]
 
-BOT_VERSION = "4.9.6"
+BOT_VERSION = "5.0.0"
 BOT_CREATOR = "VROOM"
 PANEL_HEADER_IMAGE = "panel_header.png"  # تصویر بالای پنل (تصویر جدید VROOM)
 
@@ -2738,57 +2744,310 @@ def is_emoji_message(text):
     )
     return bool(emoji_pattern.match(text))
 
+def _normalize_digit_font(font_str):
+    """فقط فونت‌هایی که دقیقاً ۱۰ کاراکتر برای ۰–۹ دارند قابل اعتمادند."""
+    if not font_str or not isinstance(font_str, str):
+        return "0123456789"
+    # اگر دیکت بود قبلاً هندل می‌شود
+    s = font_str.strip()
+    # فقط ۱۰ کاراکتر اول را برای ۰–۹ بگیر (بدون تکرار نامعتبر)
+    if len(s) < 10:
+        # پد با اعداد عادی
+        s = (s + "0123456789")[:10]
+    return s[:10]
+
+
 def convert_to_classic_font(text, font_index):
+    """تبدیل دقیق ساعت/عدد — هر رقم ۰–۹ به کاراکتر متناظر فونت نگاشت می‌شود.
+    کاراکترهای غیررقم (مثل :) دست‌نخورده می‌مانند. دیگر ۳۳:۶۷ تولید نمی‌شود."""
+    if font_index is None:
+        font_index = 0
+    try:
+        font_index = int(font_index)
+    except Exception:
+        font_index = 0
     if font_index < 0 or font_index >= len(classic_fonts):
         font_index = 0
-    if isinstance(classic_fonts[font_index], dict):
-        font = classic_fonts[font_index]
-        return ''.join(font.get(c, c) for c in text)
-    else:
-        font = classic_fonts[font_index]
-        # map digits 0-9; if font shorter/longer, use modulo or keep original
-        result = []
-        for c in text:
-            if c.isdigit():
-                d = int(c)
-                if len(font) >= 10:
-                    result.append(font[d])
-                elif len(font) > 0:
-                    result.append(font[d % len(font)])
-                else:
-                    result.append(c)
-            else:
-                result.append(c)
-        return ''.join(result)
+    entry = classic_fonts[font_index]
+    if isinstance(entry, dict):
+        return ''.join(entry.get(c, c) for c in str(text))
+    font = _normalize_digit_font(entry)
+    result = []
+    for c in str(text):
+        if c.isdigit():
+            result.append(font[int(c)])
+        else:
+            result.append(c)
+    return ''.join(result)
 
-async def get_ai_response(text, ai_type, user_id=None):
+
+def add_custom_time_font(font_digits: str) -> int:
+    """اضافه کردن فونت سفارشی (دقیقاً ۱۰ کاراکتر برای ۰–۹). ایندکس جدید را برمی‌گرداند."""
+    s = (font_digits or "").strip().replace(" ", "")
+    if len(s) < 10:
+        raise ValueError("فونت باید حداقل ۱۰ کاراکتر (۰ تا ۹) باشد")
+    s = s[:10]
+    classic_fonts.append(s)
+    return len(classic_fonts) - 1
+
+
+# ========== رمزنگاری / رمزگشایی (ایموجی و عدد) ==========
+_EMOJI_CIPHER = [
+    "🍎", "🍌", "🍒", "🍇", "🍉", "🍋", "🍑", "🍍", "🥝", "🥥",
+    "🌸", "🌺", "🌻", "🌷", "🌹", "🌼", "🍀", "🍁", "🍂", "🌿",
+    "⭐", "🌟", "✨", "⚡", "🔥", "💧", "🌈", "☀️", "🌙", "☁️",
+    "🐶", "🐱", "🐭", "🐹", "🐰", "🦊", "🐻", "🐼", "🐨", "🐯",
+    "🦁", "🐮", "🐷", "🐸", "🐵", "🐔", "🐧", "🐦", "🐤", "🦄",
+    "🎯", "🎲", "🎮", "🎨", "🎭", "🎪", "🎬", "🎤", "🎧", "🎼",
+    "💎", "💍", "👑", "🎩", "👓", "👟", "👠", "👜", "🎒", "☂️",
+    "🚀", "✈️", "🚁", "🚂", "🚗", "🚕", "🚙", "🚌", "🚎", "🏎️",
+    "🏠", "🏡", "🏢", "🏣", "🏥", "🏦", "🏨", "🏪", "🏫", "🏬",
+    "😀", "😃", "😄", "😁", "😆", "😅", "🤣", "😂", "🙂", "🙃",
+    "😉", "😊", "😇", "🥰", "😍", "🤩", "😘", "😗", "😚", "😙",
+    "😋", "😛", "😜", "🤪", "😝", "🤑", "🤗", "🤭", "🤫", "🤔",
+    "🤐", "🤨", "😐", "😑", "😶", "😏", "😒", "🙄", "😬", "🤥",
+    "😌", "😔", "😪", "🤤", "😴", "😷", "🤒", "🤕", "🤢", "🤮",
+    "🥴", "😵", "🤯", "🤠", "🥳", "😎", "🤓", "🧐", "😕", "😟",
+    "🙁", "☹️", "😮", "😯", "😲", "😳", "🥺", "😦", "😧", "😨",
+    "😰", "😥", "😢", "😭", "😱", "😖", "😣", "😞", "😓", "😩",
+    "😫", "🥱", "😤", "😡", "😠", "🤬", "😈", "👿", "💀", "☠️",
+    "💩", "🤡", "👹", "👺", "👻", "👽", "👾", "🤖", "😺", "😸",
+    "😹", "😻", "😼", "😽", "🙀", "😿", "😾", "🙈", "🙉", "🙊",
+    "💋", "💌", "💘", "💝", "💖", "💗", "💓", "💞", "💕", "💟",
+    "❣️", "💔", "❤️", "🧡", "💛", "💚", "💙", "💜", "🖤", "🤍",
+    "🤎", "💯", "💢", "💥", "💫", "💦", "💨", "🕳️", "💣", "💬",
+    "👁️‍🗨️", "🗨️", "🗯️", "💭", "💤", "👋", "🤚", "🖐️", "✋", "🖖",
+    "👌", "🤌", "🤏", "✌️", "🤞", "🤟", "🤘", "🤙", "👈", "👉",
+]
+# pad to 256 if needed
+while len(_EMOJI_CIPHER) < 256:
+    _EMOJI_CIPHER.append(_EMOJI_CIPHER[len(_EMOJI_CIPHER) % 100] + "️⃣")
+
+_ENC_PREFIX_EMOJI = "🔐E:"
+_ENC_PREFIX_NUM = "🔐N:"
+
+
+def encrypt_message_emoji(text: str) -> str:
+    raw = (text or "").encode("utf-8")
+    parts = [_EMOJI_CIPHER[b] for b in raw]
+    return _ENC_PREFIX_EMOJI + "".join(parts)
+
+
+def decrypt_message_emoji(encoded: str) -> str:
+    s = (encoded or "").strip()
+    if s.startswith(_ENC_PREFIX_EMOJI):
+        s = s[len(_ENC_PREFIX_EMOJI):]
+    # reverse map
+    rev = {}
+    for i, em in enumerate(_EMOJI_CIPHER):
+        if em not in rev:
+            rev[em] = i
+    # greedy match longest emoji first
+    ordered = sorted(rev.keys(), key=len, reverse=True)
+    out = bytearray()
+    i = 0
+    while i < len(s):
+        matched = False
+        for em in ordered:
+            if s.startswith(em, i):
+                out.append(rev[em])
+                i += len(em)
+                matched = True
+                break
+        if not matched:
+            i += 1  # skip unknown
     try:
-        if ai_type == 1:
-            url = f"{GEMINI_URL}?key={GEMINI_KEY}"
-            payload = {"contents": [{"parts": [{"text": text}]}]}
-            response = requests.post(url, json=payload, timeout=30)
-            if response.status_code == 200:
-                result = response.json()
-                if 'candidates' in result:
-                    return result['candidates'][0]['content']['parts'][0]['text'].strip()
-        elif ai_type == 2:
-            headers = {'Authorization': f'Bearer {PAXSENIX_API_KEY}', 'Content-Type': 'application/json'}
-            data = {'model': 'gpt-3.5-turbo', 'messages': [{'role': 'user', 'content': text}]}
-            response = requests.post(PAXSENIX_API_URL, headers=headers, json=data, timeout=30)
-            if response.status_code == 200:
-                result = response.json()
-                if 'choices' in result:
-                    return result['choices'][0]['message']['content'].strip()
-        elif ai_type == 3:
-            response = requests.get(DEEPSEEK_FREE_URL + quote(text), timeout=30)
-            if response.status_code == 200:
-                return response.text.strip()
-    except:
-        pass
+        return out.decode("utf-8")
+    except Exception:
+        return out.decode("utf-8", errors="replace")
+
+
+def encrypt_message_number(text: str) -> str:
+    raw = (text or "").encode("utf-8")
+    return _ENC_PREFIX_NUM + "-".join(str(b) for b in raw)
+
+
+def decrypt_message_number(encoded: str) -> str:
+    s = (encoded or "").strip()
+    if s.startswith(_ENC_PREFIX_NUM):
+        s = s[len(_ENC_PREFIX_NUM):]
+    try:
+        nums = [int(x) for x in s.split("-") if x.strip().isdigit()]
+        return bytes(nums).decode("utf-8", errors="replace")
+    except Exception as e:
+        return f"❌ خطا در رمزگشایی: {e}"
+
+
+def try_decrypt_any(text: str):
+    t = (text or "").strip()
+    if t.startswith(_ENC_PREFIX_EMOJI):
+        return decrypt_message_emoji(t)
+    if t.startswith(_ENC_PREFIX_NUM):
+        return decrypt_message_number(t)
     return None
 
 
-# ریشه‌های دستور (فقط تطبیق دقیق کلمه اول — نه پیشوند داخل متن)
+# ========== ساعت جهانی (حدود ۱۰ کشور) ==========
+WORLD_TIMEZONES = [
+    ("🇮🇷 تهران", "Asia/Tehran"),
+    ("🇸🇦 ریاض", "Asia/Riyadh"),
+    ("🇦🇪 دبی", "Asia/Dubai"),
+    ("🇹🇷 استانبول", "Europe/Istanbul"),
+    ("🇬🇧 لندن", "Europe/London"),
+    ("🇫🇷 پاریس", "Europe/Paris"),
+    ("🇩🇪 برلین", "Europe/Berlin"),
+    ("🇺🇸 نیویورک", "America/New_York"),
+    ("🇺🇸 لس‌آنجلس", "America/Los_Angeles"),
+    ("🇯🇵 توکیو", "Asia/Tokyo"),
+    ("🇨🇳 پکن", "Asia/Shanghai"),
+    ("🇦🇺 سیدنی", "Australia/Sydney"),
+]
+
+
+def format_world_times() -> str:
+    lines = ["🌍 <b>ساعت جهانی</b>\n"]
+    try:
+        from zoneinfo import ZoneInfo
+        from datetime import datetime as _dt
+        utc_now = _dt.utcnow().replace(tzinfo=ZoneInfo("UTC"))
+        for name, tzname in WORLD_TIMEZONES:
+            try:
+                local = utc_now.astimezone(ZoneInfo(tzname))
+                lines.append(f"{name}: <code>{local.strftime('%Y-%m-%d %H:%M:%S')}</code>")
+            except Exception:
+                lines.append(f"{name}: —")
+    except Exception as e:
+        lines.append(f"❌ {e}")
+    return "\n".join(lines)
+
+
+# ========== اسکن QR ==========
+async def scan_qr_from_image_path(img_path: str):
+    """برگرداندن لیست متن‌های QR از تصویر. در صورت نبود pyzbar از None."""
+    try:
+        from pyzbar.pyzbar import decode as zbar_decode
+        from PIL import Image as _PILImage
+        img = _PILImage.open(img_path)
+        results = zbar_decode(img)
+        return [r.data.decode("utf-8", errors="replace") for r in results] if results else []
+    except ImportError:
+        return None  # library missing
+    except Exception as e:
+        logger.error(f"scan_qr: {e}")
+        return []
+
+
+async def get_ai_response(text, ai_type=1, user_id=None):
+    """پاسخ چت با Kira AI (OpenAI-compatible). ai_type برای سازگاری نگه داشته شده."""
+    try:
+        headers = {
+            "Authorization": f"Bearer {KIRA_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        data = {
+            "model": KIRA_CHAT_MODEL,
+            "messages": [{"role": "user", "content": text}],
+            "temperature": 0.7,
+            "max_tokens": 2048
+        }
+        response = requests.post(KIRA_CHAT_URL, headers=headers, json=data, timeout=60)
+        if response.status_code == 200:
+            result = response.json()
+            if "choices" in result and result["choices"]:
+                return result["choices"][0]["message"]["content"].strip()
+            if "error" in result:
+                logger.error(f"Kira chat error: {result.get('error')}")
+        else:
+            logger.error(f"Kira chat HTTP {response.status_code}: {response.text[:300]}")
+    except Exception as e:
+        logger.error(f"get_ai_response: {e}")
+    return None
+
+
+async def kira_generate_image(prompt: str) -> str:
+    """ساخت تصویر با Kira — مسیر فایل PNG یا None"""
+    try:
+        headers = {
+            "Authorization": f"Bearer {KIRA_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        data = {
+            "model": KIRA_IMAGE_MODEL,
+            "prompt": prompt,
+            "n": 1,
+            "size": "1024x1024"
+        }
+        response = requests.post(KIRA_IMAGE_URL, headers=headers, json=data, timeout=120)
+        if response.status_code != 200:
+            logger.error(f"Kira image HTTP {response.status_code}: {response.text[:400]}")
+            return None
+        result = response.json()
+        items = result.get("data") or []
+        if not items:
+            logger.error(f"Kira image empty: {result}")
+            return None
+        item = items[0]
+        import tempfile, time as _t
+        out = os.path.join(tempfile.gettempdir(), f"kira_img_{int(_t.time()*1000)}.png")
+        if item.get("b64_json"):
+            with open(out, "wb") as f:
+                f.write(base64.b64decode(item["b64_json"]))
+            return out
+        if item.get("url"):
+            r = requests.get(item["url"], timeout=60)
+            if r.status_code == 200:
+                with open(out, "wb") as f:
+                    f.write(r.content)
+                return out
+        return None
+    except Exception as e:
+        logger.error(f"kira_generate_image: {e}")
+        return None
+
+
+async def kira_text_to_speech(text: str, voice: str = "alloy") -> str:
+    """متن به ویس — مسیر فایل mp3 یا None"""
+    try:
+        headers = {
+            "Authorization": f"Bearer {KIRA_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        data = {
+            "model": KIRA_TTS_MODEL,
+            "input": text[:4000],
+            "voice": voice
+        }
+        response = requests.post(KIRA_TTS_URL, headers=headers, json=data, timeout=90)
+        if response.status_code != 200:
+            logger.error(f"Kira TTS HTTP {response.status_code}: {response.text[:300]}")
+            return None
+        import tempfile, time as _t
+        out = os.path.join(tempfile.gettempdir(), f"kira_tts_{int(_t.time()*1000)}.mp3")
+        with open(out, "wb") as f:
+            f.write(response.content)
+        return out
+    except Exception as e:
+        logger.error(f"kira_text_to_speech: {e}")
+        return None
+
+
+async def kira_speech_to_text(audio_path: str) -> str:
+    """ویس به متن"""
+    try:
+        headers = {"Authorization": f"Bearer {KIRA_API_KEY}"}
+        with open(audio_path, "rb") as af:
+            files = {"file": (os.path.basename(audio_path), af, "audio/mpeg")}
+            data = {"model": KIRA_STT_MODEL}
+            response = requests.post(KIRA_STT_URL, headers=headers, files=files, data=data, timeout=90)
+        if response.status_code == 200:
+            result = response.json()
+            return (result.get("text") or "").strip()
+        logger.error(f"Kira STT HTTP {response.status_code}: {response.text[:300]}")
+    except Exception as e:
+        logger.error(f"kira_speech_to_text: {e}")
+    return None
+
+
 COMMAND_ROOTS = {
     'لیست', 'شروع', 'تایم', 'قلب', 'ماه', 'اطلاعات', 'دانلود', 'تاریخ', 'فعال', 'غیرفعال',
     'حذف', 'ست', 'بولد', 'زیرخط', 'خط', 'نقل', 'اسپویلر', 'کج', 'کد', 'پیش', 'اسپم', 'بلاک',
@@ -2801,7 +3060,7 @@ COMMAND_ROOTS = {
     'یادگیری', 'بکاپ', 'بکاب', 'اتمام', 'فال', 'اطلاعات', '.بن', '.انبن', 'بن', 'انبن', 'دارت', 'بسکتبال', 'فوتبال', '.بن', '.انبن', 'بن', 'انبن',
     'یوزرنیم',
     'یوزنیم', 'ایدی', 'آیدی', 'آیدی\u200cعددی', 'ایدی\u200cعددی', 'username', 'id',
-    'فیلتر', 'ویس', 'صدا', 'ویدیوبهویس', 'ویدیو_به_ویس',
+    'فیلتر', 'ویس', 'صدا', 'ویدیوبهویس', 'ویدیو_به_ویس', 'کیرا', 'هوش', 'عکس', 'رمزنگاری', 'رمزگشایی', 'ساعت', 'جهانی', 'همیشه', 'نقطه', 'اسکن', 'qr', 'QR', 'github', 'گیت‌هاب', 'گیتهاب', 'ویکی', 'هوا', 'ماشین', 'حساب',
 }
 
 def is_bot_command_text(text: str) -> bool:
@@ -3029,7 +3288,7 @@ class SelfBotManager:
         self.search_mode = False
         self.last_search_results = []
         self.connection_attempts = 0
-        self.max_attempts = 5
+        self.max_attempts = 2
         self._handlers_set = False
         self.panel_mode = True
         self.api_id = None
@@ -3049,6 +3308,8 @@ class SelfBotManager:
         self.monshi_draft = ""
         self.learning_step = None  # None | 'wait_answer'
         self.learning_question = None
+        self.always_online = False
+        self.auto_qr_scan = True
         self.learning_enabled = True
         self.backup_enabled = False
         self.backup_step = None
@@ -3398,6 +3659,8 @@ class SelfBotManager:
             self.panel_mode = settings.get('panel_mode', True)
             self.time_font_indices = settings.get('time_font_indices', 'all')
             self.autosend_mode = settings.get('autosend_mode', False)
+            self.always_online = bool(settings.get('always_online', 0))
+            self.auto_qr_scan = bool(settings.get('auto_qr_scan', 1))
             
             monshi_data = db.get_monshi_status(self.user_id)
             self.monshi_mode = monshi_data['status']
@@ -3423,6 +3686,7 @@ class SelfBotManager:
             self.last_error_time = 0
             
             asyncio.create_task(self.keep_alive_task())
+            asyncio.create_task(self.always_online_task())
             
             # ساخت خودکار گروه گزارش در صورت نیاز (اولین ورود)
             try:
@@ -3438,10 +3702,31 @@ class SelfBotManager:
             
             if self.connection_attempts < self.max_attempts:
                 wait_time = 5 * self.connection_attempts
-                logger.info(f"تلاش مجدد در {wait_time} ثانیه برای کاربر {self.user_id} - تلاش {self.connection_attempts + 1}")
+                logger.info(f"تلاش مجدد در {wait_time} ثانیه برای کاربر {self.user_id} - تلاش {self.connection_attempts + 1}/{self.max_attempts}")
                 await asyncio.sleep(wait_time)
                 return await self.start(session_file)
             
+            # بعد از ۲ تلاش ناموفق — از دیتابیس حذف / غیرفعال
+            logger.error(f"❌ کاربر {self.user_id} پس از {self.max_attempts} تلاش وصل نشد — حذف از دیتابیس فعال")
+            try:
+                db.update_user(str(self.user_id), self_active=0, session_file=None, admin_approved=0)
+            except Exception as e:
+                logger.error(f"db deactivate {self.user_id}: {e}")
+            try:
+                # حذف فایل سشن در صورت وجود
+                sf = session_file
+                if sf and os.path.exists(sf):
+                    try:
+                        os.remove(sf)
+                    except Exception:
+                        pass
+                if sf and os.path.exists(str(sf) + "-journal"):
+                    try:
+                        os.remove(str(sf) + "-journal")
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             if self.client:
                 try:
                     await self.client.disconnect()
@@ -3688,6 +3973,15 @@ class SelfBotManager:
         command_text = command_text.replace(chr(0x200c), '')
         if not command_text:
             return
+        # اگر نقطه اجباری باشد و پیام با نقطه شروع نشود و دستور باشد، نادیده بگیر
+        try:
+            _dot_req = bool(db.get_selfbot_settings(self.user_id).get('command_dot_required', 0))
+            if _dot_req and command_text and not command_text.startswith('.') and not command_text.startswith('/'):
+                # هنوز دستور تشخیص داده شود ولی نقطه لازم است
+                if is_bot_command_text(command_text) or is_bot_command_text(raw_text):
+                    return
+        except Exception:
+            pass
         if not is_bot_command_text(command_text) and not is_bot_command_text(raw_text):
             return
         
@@ -5288,17 +5582,17 @@ class SelfBotManager:
                 ai_status['ai_1_pm'] = True
                 ai_status['ai_2_pm'] = False
                 ai_status['ai_3_pm'] = False
-                message = '✅ هوش ۱ (Gemini) در پی‌وی روشن شد'
+                message = '✅ Kira AI در پی‌وی روشن شد'
             elif ai_num == 2:
                 ai_status['ai_1_pm'] = False
                 ai_status['ai_2_pm'] = True
                 ai_status['ai_3_pm'] = False
-                message = '✅ هوش ۲ (Paxsenix) در پی‌وی روشن شد'
+                message = '✅ Kira AI در پی‌وی روشن شد'
             else:
                 ai_status['ai_1_pm'] = False
                 ai_status['ai_2_pm'] = False
                 ai_status['ai_3_pm'] = True
-                message = '✅ هوش ۳ (DeepSeek) در پی‌وی روشن شد'
+                message = '✅ Kira AI در پی‌وی روشن شد'
             db.update_ai_status(self.user_id, ai_status)
             await event.edit(message)
             return
@@ -5359,17 +5653,17 @@ class SelfBotManager:
                 ai_status['ai_1_group'] = True
                 ai_status['ai_2_group'] = False
                 ai_status['ai_3_group'] = False
-                message = '✅ هوش ۱ (Gemini) در گروه روشن شد'
+                message = '✅ Kira AI در گروه روشن شد'
             elif ai_num == 2:
                 ai_status['ai_1_group'] = False
                 ai_status['ai_2_group'] = True
                 ai_status['ai_3_group'] = False
-                message = '✅ هوش ۲ (Paxsenix) در گروه روشن شد'
+                message = '✅ Kira AI در گروه روشن شد'
             else:
                 ai_status['ai_1_group'] = False
                 ai_status['ai_2_group'] = False
                 ai_status['ai_3_group'] = True
-                message = '✅ هوش ۳ (DeepSeek) در گروه روشن شد'
+                message = '✅ Kira AI در گروه روشن شد'
             db.update_ai_status(self.user_id, ai_status)
             await event.edit(message)
             return
@@ -6296,6 +6590,214 @@ class SelfBotManager:
                 await event.respond(f"⚠️ خطا: {str(e)[:100]}")
             return
         
+
+        # ========== ساخت عکس با Kira ==========
+        if cmd in ('ساخت', 'عکس') and (
+            (cmd == 'ساخت' and args and args[0] == 'عکس') or
+            (cmd == 'عکس' and args) or
+            command_text.startswith('ساخت عکس')
+        ):
+            prompt = command_text
+            for pref in ('ساخت عکس', 'ساخت', 'عکس'):
+                if prompt.startswith(pref):
+                    prompt = prompt[len(pref):].strip()
+                    break
+            if not prompt:
+                await event.edit("❌ مثال: ساخت عکس یک گربه سایبرپانک")
+                return
+            await event.edit("🖼 در حال ساخت تصویر با Kira AI...")
+            try:
+                img_path = await kira_generate_image(prompt)
+                if img_path and os.path.exists(img_path):
+                    await self.client.send_file(chat_id, img_path, caption=f"🖼 {prompt[:80]}")
+                    try:
+                        os.remove(img_path)
+                    except Exception:
+                        pass
+                    try:
+                        await event.delete()
+                    except Exception:
+                        pass
+                else:
+                    await event.edit("❌ ساخت تصویر ناموفق بود. بعداً تلاش کنید.")
+            except Exception as e:
+                await event.edit(f"❌ خطا: {str(e)[:120]}")
+            return
+
+        # ========== چت مستقیم Kira ==========
+        if cmd in ('کیرا', 'هوش') and args:
+            q = ' '.join(args)
+            await event.edit("🤖 Kira در حال فکر کردن...")
+            try:
+                ans = await get_ai_response(q, 1, self.user_id)
+                if ans:
+                    text, entities = await apply_text_style(ans, db.get_selfbot_settings(self.user_id).get('text_style'))
+                    await event.edit(text, formatting_entities=entities if entities else None)
+                else:
+                    await event.edit("❌ پاسخی دریافت نشد")
+            except Exception as e:
+                await event.edit(f"❌ {str(e)[:100]}")
+            return
+
+        # ========== رمزنگاری ==========
+        if cmd == 'رمزنگاری':
+            mode = 'emoji'
+            if args and args[0] in ('عدد', 'عددی', 'number', 'num'):
+                mode = 'num'
+            elif args and args[0] in ('ایموجی', 'emoji', 'شکلک'):
+                mode = 'emoji'
+            src = None
+            if event.is_reply:
+                reply_msg = await event.get_reply_message()
+                if reply_msg and reply_msg.text:
+                    src = reply_msg.text
+            if not src and args:
+                # بقیه آرگومان‌ها متن است
+                skip = 1 if args and args[0] in ('عدد', 'عددی', 'number', 'num', 'ایموجی', 'emoji', 'شکلک') else 0
+                src = ' '.join(args[skip:]).strip() or None
+            if not src:
+                await event.edit("❌ ریپلای روی پیام یا بنویس: رمزنگاری ایموجی سلام")
+                return
+            try:
+                if mode == 'num':
+                    out = encrypt_message_number(src)
+                else:
+                    out = encrypt_message_emoji(src)
+                await event.edit(out)
+            except Exception as e:
+                await event.edit(f"❌ {e}")
+            return
+
+        if cmd == 'رمزگشایی':
+            src = None
+            if event.is_reply:
+                reply_msg = await event.get_reply_message()
+                if reply_msg and reply_msg.text:
+                    src = reply_msg.text
+            if not src and args:
+                src = ' '.join(args)
+            if not src:
+                await event.edit("❌ ریپلای روی پیام رمزنگاری‌شده")
+                return
+            plain = try_decrypt_any(src)
+            if plain is None:
+                # تلاش بدون پیشوند
+                if any(c in src for c in ('🍎', '🍌', '🔐')):
+                    plain = decrypt_message_emoji(src)
+                elif src.replace('-', '').replace(' ', '').isdigit() or '-' in src:
+                    plain = decrypt_message_number(src)
+                else:
+                    await event.edit("❌ این پیام رمزنگاری‌شده شناخته نشد")
+                    return
+            await event.edit(f"🔓 متن اصلی:\n\n{plain}")
+            return
+
+        # ========== ساعت جهانی ==========
+        if (cmd == 'ساعت' and args and args[0] in ('جهانی', 'کشورها', 'دنیا')) or command_text.strip() in ('ساعت جهانی', 'زمان جهانی'):
+            try:
+                await event.edit(format_world_times(), parse_mode='html')
+            except Exception:
+                await event.edit(format_world_times().replace('<b>', '').replace('</b>', '').replace('<code>', '').replace('</code>', ''))
+            return
+
+        # ========== همیشه آنلاین ==========
+        if cmd == 'همیشه' and args and args[0] == 'آنلاین':
+            on = True
+            if len(args) > 1 and args[1] in ('خاموش', 'off', '0'):
+                on = False
+            db.update_selfbot_setting(self.user_id, 'always_online', 1 if on else 0)
+            self.always_online = on
+            await event.edit("✅ همیشه آنلاین روشن شد" if on else "✅ حالت همیشه آنلاین خاموش شد")
+            return
+
+        # ========== نقطه قبل دستور ==========
+        if cmd == 'نقطه':
+            if args and args[0] in ('روشن', 'on', '1'):
+                db.update_selfbot_setting(self.user_id, 'command_dot_required', 1)
+                await event.edit("✅ از این به بعد دستورات باید با نقطه شروع شوند (مثل .پنل)")
+            elif args and args[0] in ('خاموش', 'off', '0'):
+                db.update_selfbot_setting(self.user_id, 'command_dot_required', 0)
+                await event.edit("✅ دستورات بدون نقطه هم کار می‌کنند")
+            else:
+                cur = db.get_selfbot_settings(self.user_id).get('command_dot_required')
+                await event.edit(f"وضعیت نقطه: {'روشن' if cur else 'خاموش'}\nدستور: نقطه روشن | نقطه خاموش")
+            return
+
+        # ========== اضافه کردن فونت ساعت ==========
+        if cmd == 'اضافه' and args and args[0] == 'کردن' and len(args) > 1 and args[1] == 'فونت':
+            digits = ' '.join(args[2:]).replace(' ', '')
+            if len(digits) < 10:
+                await event.edit("❌ بعد از دستور، دقیقاً ۱۰ کاراکتر برای ارقام ۰ تا ۹ بفرستید.\nمثال:\nاضافه کردن فونت 0123456789")
+                return
+            try:
+                idx_new = add_custom_time_font(digits)
+                await event.edit(f"✅ فونت جدید اضافه شد با ایندکس {idx_new}\nنمونه ساعت: {convert_to_classic_font('12:34', idx_new)}")
+            except Exception as e:
+                await event.edit(f"❌ {e}")
+            return
+        if command_text.startswith('اضافه کردن فونت'):
+            digits = command_text.replace('اضافه کردن فونت', '', 1).strip().replace(' ', '')
+            if len(digits) < 10:
+                await event.edit("❌ ۱۰ کاراکتر برای ۰–۹ لازم است\nمثال: اضافه کردن فونت 𝟘𝟙𝟚𝟛𝟜𝟝𝟞𝟟𝟠𝟡")
+                return
+            try:
+                idx_new = add_custom_time_font(digits)
+                await event.edit(f"✅ فونت جدید اضافه شد ({idx_new})\nنمونه: {convert_to_classic_font('09:45', idx_new)}")
+            except Exception as e:
+                await event.edit(f"❌ {e}")
+            return
+
+        # ========== اسکن QR ==========
+        if cmd in ('اسکن', 'qr', 'QR') or (cmd == 'اسکن' and args and args[0] in ('qr', 'QR', 'کد')):
+            if not event.is_reply:
+                await event.edit("❌ روی عکس یا ویدیوی دارای QR ریپلای کنید")
+                return
+            await event.edit("📷 در حال اسکن QR...")
+            reply_msg = await event.get_reply_message()
+            results = await self.scan_qr_media(reply_msg)
+            if not results:
+                await event.edit("❌ کد QR پیدا نشد")
+            else:
+                body = "\n\n".join(f"• {r}" for r in results)
+                await event.edit(f"📷 نتیجه اسکن QR:\n\n{body[:3500]}")
+            return
+
+        # ========== QR بدون نقطه هم ==========
+        if cmd in ('کد', '.کد') or command_text.startswith('کد '):
+            await event.delete()
+            try:
+                if event.is_reply:
+                    reply_msg = await event.get_reply_message()
+                    if reply_msg and reply_msg.text:
+                        qr_path, text = await self.generate_qr_code(reply_msg.text)
+                    elif reply_msg and (reply_msg.photo or reply_msg.document or reply_msg.video):
+                        qr_path, text = await self.generate_qr_code(reply_msg.media, is_photo=True)
+                    else:
+                        await event.respond("⚠️ روی پیام متنی یا عکس/ویدیو ریپلای کنید")
+                        return
+                else:
+                    qr_text = command_text.lstrip('.').replace('کد', '', 1).strip()
+                    if qr_text:
+                        qr_path, text = await self.generate_qr_code(qr_text)
+                    else:
+                        await event.respond("⚠️ متن را بعد از «کد» بنویسید یا ریپلای کنید")
+                        return
+                if qr_path and os.path.exists(qr_path):
+                    await self.client.send_file(
+                        chat_id, qr_path,
+                        caption=f"🝰 کد QR\n📝 {str(text)[:100]}"
+                    )
+                    try:
+                        os.remove(qr_path)
+                    except Exception:
+                        pass
+                else:
+                    await event.respond(f"⚠️ خطا: {text}")
+            except Exception as e:
+                await event.respond(f"⚠️ {str(e)[:100]}")
+            return
+
+
         if cmd == '.کد' and not args:
             await event.delete()
             try:
@@ -6329,6 +6831,194 @@ class SelfBotManager:
                 await event.respond(f"⚠️ خطا: {str(e)[:100]}")
             return
         
+
+        # ========== ماشین حساب ==========
+        if cmd in ('حساب', 'ماشین', 'calc', 'calculator') or (cmd == 'ماشین' and args and args[0] == 'حساب'):
+            expr = ' '.join(args)
+            if cmd == 'ماشین' and args and args[0] == 'حساب':
+                expr = ' '.join(args[1:])
+            if not expr and event.is_reply:
+                rm = await event.get_reply_message()
+                if rm and rm.text:
+                    expr = rm.text.strip()
+            if not expr:
+                await event.edit("❌ مثال: حساب 2+2*10\\nیا: ماشین حساب (12+5)/3")
+                return
+            try:
+                import ast as _ast
+                import operator as _op
+                allowed = {
+                    _ast.Add: _op.add, _ast.Sub: _op.sub, _ast.Mult: _op.mul,
+                    _ast.Div: _op.truediv, _ast.Pow: _op.pow, _ast.USub: _op.neg,
+                    _ast.Mod: _op.mod, _ast.FloorDiv: _op.floordiv,
+                }
+                def _eval(node):
+                    if isinstance(node, _ast.Expression):
+                        return _eval(node.body)
+                    if isinstance(node, _ast.Constant) and isinstance(node.value, (int, float)):
+                        return node.value
+                    if isinstance(node, _ast.Num):
+                        return node.n
+                    if isinstance(node, _ast.BinOp) and type(node.op) in allowed:
+                        return allowed[type(node.op)](_eval(node.left), _eval(node.right))
+                    if isinstance(node, _ast.UnaryOp) and type(node.op) in allowed:
+                        return allowed[type(node.op)](_eval(node.operand))
+                    raise ValueError("عبارت نامعتبر")
+                tree = _ast.parse(expr.replace('×', '*').replace('÷', '/').replace('^', '**'), mode='eval')
+                val = _eval(tree)
+                await event.edit(f"🔢 `{expr}` = **{val}**")
+            except Exception as e:
+                await event.edit(f"❌ خطا در محاسبه: {e}")
+            return
+
+        # ========== آب و هوا ==========
+        if cmd in ('هوا', 'آب‌وهوا', 'اب و هوا') or (cmd == 'آب' and args and args[0] in ('و', 'وهوا')) or command_text.startswith('آب و هوا'):
+            city = ' '.join(args)
+            if cmd == 'آب' or command_text.startswith('آب و هوا'):
+                city = command_text.replace('آب و هوا', '').replace('آب‌وهوا', '').replace('هوا', '').strip()
+            if not city:
+                city = 'Tehran'
+            await event.edit(f"🌤 آب و هوای {city}...")
+            try:
+                # wttr.in — بدون کلید API
+                url = f"https://wttr.in/{requests.utils.quote(city)}?format=j1&lang=fa"
+                r = requests.get(url, timeout=12, headers={"User-Agent": "selfbot"})
+                if r.status_code != 200:
+                    # fallback text
+                    r2 = requests.get(f"https://wttr.in/{requests.utils.quote(city)}?lang=fa&T", timeout=12, headers={"User-Agent": "selfbot"})
+                    await event.edit(r2.text[:3500] if r2.status_code == 200 else "❌ خطا در دریافت آب و هوا")
+                    return
+                data = r.json()
+                cur = data.get('current_condition', [{}])[0]
+                area = (data.get('nearest_area') or [{}])[0]
+                name = ''
+                try:
+                    name = area.get('areaName', [{}])[0].get('value', city)
+                except Exception:
+                    name = city
+                temp = cur.get('temp_C', '?')
+                feels = cur.get('FeelsLikeC', '?')
+                desc = ''
+                try:
+                    desc = cur.get('lang_fa', cur.get('weatherDesc', [{}]))[0].get('value', '')
+                except Exception:
+                    desc = str(cur.get('weatherDesc', ''))
+                hum = cur.get('humidity', '?')
+                wind = cur.get('windspeedKmph', '?')
+                txt = (
+                    f"🌤 **آب و هوا — {name}**\\n\\n"
+                    f"🌡 دما: {temp}°C (احساس: {feels}°C)\\n"
+                    f"☁️ وضعیت: {desc}\\n"
+                    f"💧 رطوبت: {hum}%\\n"
+                    f"💨 باد: {wind} km/h"
+                )
+                await event.edit(txt)
+            except Exception as e:
+                await event.edit(f"❌ {str(e)[:120]}")
+            return
+
+        # ========== ویکی‌پدیا ==========
+        if cmd in ('ویکی', 'ویکیپدیا', 'wikipedia') or (cmd == 'ویکی' and args):
+            q = ' '.join(args).strip()
+            if not q:
+                await event.edit("❌ مثال: ویکی تلگرام")
+                return
+            await event.edit(f"📚 جستجو در ویکی: {q}")
+            try:
+                api = "https://fa.wikipedia.org/api/rest_v1/page/summary/" + requests.utils.quote(q.replace(' ', '_'))
+                r = requests.get(api, timeout=12, headers={"User-Agent": "SelfBot/1.0"})
+                if r.status_code == 200:
+                    j = r.json()
+                    title = j.get('title', q)
+                    extract = j.get('extract', 'بدون توضیح')
+                    url = j.get('content_urls', {}).get('desktop', {}).get('page', '')
+                    await event.edit(f"📚 **{title}**\\n\\n{extract[:3000]}\\n\\n🔗 {url}")
+                else:
+                    # search
+                    s = requests.get(
+                        "https://fa.wikipedia.org/w/api.php",
+                        params={"action": "opensearch", "search": q, "limit": 5, "format": "json"},
+                        timeout=12,
+                    )
+                    data = s.json()
+                    if len(data) > 1 and data[1]:
+                        lines = [f"• {t}" for t in data[1][:5]]
+                        await event.edit("📚 نتایج ویکی:\\n" + "\\n".join(lines) + "\\n\\nدقیق‌تر جستجو کنید.")
+                    else:
+                        await event.edit("❌ چیزی پیدا نشد")
+            except Exception as e:
+                await event.edit(f"❌ {e}")
+            return
+
+        # ========== گیت‌هاب ==========
+        if cmd in ('گیتهاب', 'گیت‌هاب', 'github') or command_text.startswith('گیت هاب'):
+            rest = command_text
+            for p in ('گیت هاب', 'گیت‌هاب', 'گیتهاب', 'github'):
+                if rest.lower().startswith(p.lower()) or rest.startswith(p):
+                    rest = rest[len(p):].strip()
+                    break
+            if not rest and args:
+                rest = ' '.join(args)
+            if not rest:
+                await event.edit("❌ مثال:\\nگیتهاب user\\nگیتهاب https://github.com/user/repo")
+                return
+            # اگر لینک ریپو باشد → دانلود zip
+            if 'github.com' in rest and ('/' in rest.replace('https://github.com/', '')):
+                url = rest.strip()
+                if not url.startswith('http'):
+                    url = 'https://' + url
+                # normalize to archive zip
+                parts = url.rstrip('/').split('github.com/')[-1].split('/')
+                if len(parts) >= 2:
+                    owner, repo = parts[0], parts[1].replace('.git', '')
+                    zip_url = f"https://github.com/{owner}/{repo}/archive/refs/heads/main.zip"
+                    await event.edit(f"⬇️ دانلود {owner}/{repo}...")
+                    try:
+                        r = requests.get(zip_url, timeout=60, allow_redirects=True)
+                        if r.status_code != 200:
+                            zip_url = f"https://github.com/{owner}/{repo}/archive/refs/heads/master.zip"
+                            r = requests.get(zip_url, timeout=60, allow_redirects=True)
+                        if r.status_code == 200 and len(r.content) > 100:
+                            import tempfile
+                            out = os.path.join(tempfile.gettempdir(), f"{repo}.zip")
+                            with open(out, 'wb') as f:
+                                f.write(r.content)
+                            await self.client.send_file(chat_id, out, caption=f"📦 {owner}/{repo}")
+                            try:
+                                os.remove(out)
+                            except Exception:
+                                pass
+                            try:
+                                await event.delete()
+                            except Exception:
+                                pass
+                        else:
+                            await event.edit(f"❌ دانلود ناموفق ({r.status_code}). لینک: {zip_url}")
+                    except Exception as e:
+                        await event.edit(f"❌ {e}")
+                    return
+            # پروفایل کاربر
+            user = rest.strip().strip('/').split('/')[-1]
+            await event.edit(f"👤 مشخصات گیت‌هاب: {user}")
+            try:
+                r = requests.get(f"https://api.github.com/users/{user}", timeout=12, headers={"User-Agent": "SelfBot", "Accept": "application/vnd.github+json"})
+                if r.status_code != 200:
+                    await event.edit(f"❌ کاربر پیدا نشد ({r.status_code})")
+                    return
+                j = r.json()
+                txt = (
+                    f"👤 **{j.get('name') or user}** (@{j.get('login')})\\n"
+                    f"📝 {j.get('bio') or '—'}\\n"
+                    f"📦 ریپو: {j.get('public_repos')} | 👥 {j.get('followers')} followers\\n"
+                    f"📍 {j.get('location') or '—'}\\n"
+                    f"🔗 {j.get('html_url')}"
+                )
+                await event.edit(txt)
+            except Exception as e:
+                await event.edit(f"❌ {e}")
+            return
+
+
         if cmd == 'شروع' and not args:
             await event.delete()
             try:
@@ -6339,6 +7029,20 @@ class SelfBotManager:
         
         return
     
+
+    async def always_online_task(self):
+        """نگه‌داشتن وضعیت آنلاین در صورت فعال بودن always_online"""
+        while self.running:
+            try:
+                if getattr(self, 'always_online', False) and self.client and self.client.is_connected():
+                    try:
+                        await self.client(UpdateStatusRequest(offline=False))
+                    except Exception as e:
+                        logger.debug(f"always_online: {e}")
+            except Exception:
+                pass
+            await asyncio.sleep(30)
+
     async def update_bio_task(self):
         while self.running:
             try:
@@ -6486,24 +7190,78 @@ class SelfBotManager:
             return None
     
     async def generate_qr_code(self, text_or_photo, is_photo=False):
+        """ساخت QR از متن یا مدیا. اگر is_photo=True، ابتدا سعی در اسکن QR موجود می‌کند؛
+        در غیر این صورت از نام/مسیر فایل به‌عنوان محتوا QR می‌سازد."""
         try:
+            text = None
             if is_photo:
-                photo_path = await self.client.download_media(text_or_photo)
-                if photo_path and os.path.exists(photo_path):
-                    text = f"Image: {os.path.basename(photo_path)}"
-                    os.remove(photo_path)
+                media_path = await self.client.download_media(text_or_photo)
+                if not media_path or not os.path.exists(media_path):
+                    return None, "خطا در دانلود مدیا"
+                # اگر خود فایل QR باشد، محتوایش را برگردان (برای نمایش)
+                scanned = await scan_qr_from_image_path(media_path)
+                if scanned is not None and scanned:
+                    try:
+                        os.remove(media_path)
+                    except Exception:
+                        pass
+                    # برای ساخت QR دوباره از همان متن
+                    text = scanned[0]
                 else:
-                    return None, "خطا در دانلود عکس"
+                    # محتوای QR = لینک/نام فایل یا توضیح
+                    text = f"media:{os.path.basename(media_path)}"
+                    try:
+                        os.remove(media_path)
+                    except Exception:
+                        pass
             else:
                 text = text_or_photo
             if not text:
                 return None, "متن خالی است"
-            qr = qrcode.make(text)
+            qr = qrcode.make(str(text))
             qr_path = f"qr_{self.user_id}_{int(time.time())}.png"
             qr.save(qr_path)
-            return qr_path, text
+            return qr_path, str(text)
         except Exception as e:
             return None, str(e)
+
+    async def scan_qr_media(self, message):
+        """اسکن QR از پیام دارای عکس/سند تصویری. لیست رشته‌ها یا پیام خطا."""
+        try:
+            if not message:
+                return []
+            path = await self.client.download_media(message)
+            if not path or not os.path.exists(path):
+                return []
+            # اگر ویدیو بود یک فریم استخراج کن
+            lower = path.lower()
+            if lower.endswith(('.mp4', '.mov', '.mkv', '.webm', '.avi')):
+                try:
+                    import subprocess, tempfile
+                    frame = os.path.join(tempfile.gettempdir(), f"qrframe_{self.user_id}.jpg")
+                    subprocess.run(
+                        ["ffmpeg", "-y", "-i", path, "-vframes", "1", "-q:v", "2", frame],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30
+                    )
+                    if os.path.exists(frame):
+                        try:
+                            os.remove(path)
+                        except Exception:
+                            pass
+                        path = frame
+                except Exception as e:
+                    logger.debug(f"ffmpeg frame: {e}")
+            results = await scan_qr_from_image_path(path)
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+            if results is None:
+                return ["⚠️ برای اسکن QR کتابخانه pyzbar را نصب کنید: pip install pyzbar pillow"]
+            return results
+        except Exception as e:
+            logger.error(f"scan_qr_media: {e}")
+            return []
     
     async def get_admins(self, chat_id):
         try:
@@ -6644,45 +7402,74 @@ class SelfBotManager:
                         await asyncio.sleep(1)
         self.spam_tasks[enemy_id] = asyncio.create_task(spam_task())
     
-    async def update_profile_name(self):
+    async def update_profile_name(self, force=False):
+        """به‌روزرسانی نام پروفایل با ساعت — فقط یک‌بار در هر دقیقه و فقط اگر نام واقعاً عوض شده باشد.
+        در صورت FloodWait صبر می‌کند و دوباره تلاش نمی‌کند تا دقیقه بعد."""
         settings = db.get_selfbot_settings(self.user_id)
-        if settings.get('time_enabled'):
-            now = get_now()
-            current_minute = now.minute
-            if self.time_font_indices == 'all':
-                font_index = current_minute % len(classic_fonts)
-            elif isinstance(self.time_font_indices, list) and self.time_font_indices:
-                if hasattr(self, 'time_font_cycle'):
-                    self.time_font_cycle = (self.time_font_cycle + 1) % len(self.time_font_indices)
-                else:
-                    self.time_font_cycle = 0
-                font_index = self.time_font_indices[self.time_font_cycle]
-                if font_index >= len(classic_fonts):
-                    font_index = 0
+        if not settings.get('time_enabled'):
+            return
+        # اگر هنوز در انتظار رفع محدودیت هستیم
+        flood_until = getattr(self, '_profile_flood_until', 0) or 0
+        now_ts = time.time()
+        if not force and now_ts < flood_until:
+            return
+        now = get_now()
+        current_minute = now.minute
+        current_hm = now.strftime("%H:%M")
+        # فقط وقتی دقیقه عوض شد (یا force)
+        last_hm = getattr(self, '_last_profile_time_hm', None)
+        if not force and last_hm == current_hm:
+            return
+        if self.time_font_indices == 'all':
+            font_index = current_minute % max(len(classic_fonts), 1)
+        elif isinstance(self.time_font_indices, list) and self.time_font_indices:
+            if hasattr(self, 'time_font_cycle'):
+                self.time_font_cycle = (self.time_font_cycle + 1) % len(self.time_font_indices)
             else:
+                self.time_font_cycle = 0
+            font_index = self.time_font_indices[self.time_font_cycle]
+            if font_index >= len(classic_fonts):
                 font_index = 0
-            time_now = now.strftime("%H:%M")
-            time_now_classic = convert_to_classic_font(time_now, font_index)
-            try:
-                current_name = db.get_current_name(self.user_id)
-                if not current_name:
-                    current_name = self.BASE_NAME
-                if settings.get('flag_enabled'):
-                    sel_flags = settings.get('selected_flags', 'all')
-                    if sel_flags == 'all' or not sel_flags:
-                        use_flags = flags
-                    else:
-                        use_flags = sel_flags if isinstance(sel_flags, list) else flags
-                    if not use_flags:
-                        use_flags = flags
-                    flag_index = current_minute % len(use_flags)
-                    flag = use_flags[flag_index]
-                    new_name = f"『 {flag} 』{current_name} {time_now_classic}"
+        else:
+            font_index = 0
+        time_now_classic = convert_to_classic_font(current_hm, font_index)
+        try:
+            current_name = db.get_current_name(self.user_id)
+            if not current_name:
+                current_name = self.BASE_NAME or "User"
+            if settings.get('flag_enabled'):
+                sel_flags = settings.get('selected_flags', 'all')
+                if sel_flags == 'all' or not sel_flags:
+                    use_flags = flags
                 else:
-                    new_name = f"{current_name} | {time_now_classic}"
-                await self.client(UpdateProfileRequest(first_name=new_name))
-            except:
-                pass
+                    use_flags = sel_flags if isinstance(sel_flags, list) else flags
+                if not use_flags:
+                    use_flags = flags
+                flag_index = current_minute % len(use_flags)
+                flag = use_flags[flag_index]
+                new_name = f"『 {flag} 』{current_name} {time_now_classic}"
+            else:
+                new_name = f"{current_name} | {time_now_classic}"
+            # تلگرام محدودیت طول first_name دارد (~64)
+            if len(new_name) > 64:
+                new_name = new_name[:64]
+            # اگر همان نام قبلی است، درخواست نفرست
+            if not force and getattr(self, '_last_profile_name_sent', None) == new_name:
+                self._last_profile_time_hm = current_hm
+                return
+            if not self.client or not self.client.is_connected():
+                return
+            await self.client(UpdateProfileRequest(first_name=new_name))
+            self._last_profile_name_sent = new_name
+            self._last_profile_time_hm = current_hm
+            logger.debug(f"profile time updated {self.user_id}: {current_hm}")
+        except FloodWaitError as fl:
+            wait_s = int(getattr(fl, 'seconds', 60) or 60)
+            # صبر تا پایان محدودیت + کمی بافر؛ در این مدت درخواست جدید نمی‌فرستیم
+            self._profile_flood_until = time.time() + wait_s + 5
+            logger.warning(f"FloodWait profile name user {self.user_id}: {wait_s}s — تا آن زمان آپدیت ساعت متوقف")
+        except Exception as e:
+            logger.debug(f"update_profile_name {self.user_id}: {e}")
     
     async def restore_profile_name(self):
         try:
@@ -6897,22 +7684,37 @@ class SelfBotManager:
 
 
     async def update_profile_task(self):
+        """هر دقیقه فقط یک‌بار نام پروفایل را عوض می‌کند (بدون اسپم درخواست).
+        نزدیک مرز دقیقه sleep می‌کند تا دقیقاً سر دقیقه به‌روز شود."""
         while self.running:
             try:
-                await self.update_profile_name()
+                now = get_now()
+                # ثانیه‌های باقی‌مانده تا دقیقه بعد (حداقل ۲ ثانیه بافر بعد از :00)
+                sec = now.second
+                # اگر در ثانیه ۰–۵ هستیم، همین الان آپدیت کن؛ وگرنه تا دقیقه بعد صبر کن
+                if sec <= 5:
+                    try:
+                        await self.update_profile_name()
+                    except Exception as e:
+                        logger.error(f"خطا در update_profile_task برای کاربر {self.user_id}: {e}")
+                    try:
+                        settings = db.get_selfbot_settings(self.user_id)
+                        if settings.get('profile_clock_enabled'):
+                            cur_min = now.minute
+                            last = getattr(self, '_last_pclock_minute', None)
+                            if last is None or last != cur_min:
+                                self._last_pclock_minute = cur_min
+                                await self.update_profile_clock()
+                    except Exception as e:
+                        logger.error(f"profile_clock task: {e}")
+                    # تا نزدیک دقیقه بعد بخواب (۵۸ ثانیه تقریباً)
+                    await asyncio.sleep(55)
+                else:
+                    sleep_for = max(1, 60 - sec + 1)
+                    await asyncio.sleep(min(sleep_for, 60))
             except Exception as e:
-                logger.error(f"خطا در update_profile_task برای کاربر {self.user_id}: {e}")
-            # ساعت روی پروفایل — فقط وقتی دقیقه عوض شد
-            try:
-                settings = db.get_selfbot_settings(self.user_id)
-                if settings.get('profile_clock_enabled'):
-                    cur_min = get_now().minute
-                    last = getattr(self, '_last_pclock_minute', None)
-                    if last is None or last != cur_min:
-                        await self.update_profile_clock()
-            except Exception as e:
-                logger.error(f"profile_clock task: {e}")
-            await asyncio.sleep(20)
+                logger.error(f"update_profile_task loop: {e}")
+                await asyncio.sleep(30)
     
     async def heart_animation(self, chat_id):
         try:
@@ -7038,20 +7840,8 @@ class SelfBotManager:
         spam_messages = len(db.get_enemy_spam_messages(self.user_id))
         font_info = "همه فونت‌ها" if self.time_font_indices == 'all' else f"فونت‌های {self.time_font_indices}"
         ai_status = settings.get('ai_status', {})
-        active_ai_pm = "هیچ هوش فعالی در پی‌وی وجود ندارد"
-        if ai_status.get('ai_1_pm'):
-            active_ai_pm = "هوش ۱ (Gemini)"
-        elif ai_status.get('ai_2_pm'):
-            active_ai_pm = "هوش ۲ (Paxsenix API)"
-        elif ai_status.get('ai_3_pm'):
-            active_ai_pm = "هوش ۳ (DeepSeek)"
-        active_ai_group = "هیچ هوش فعالی در گروه وجود ندارد"
-        if ai_status.get('ai_1_group'):
-            active_ai_group = "هوش ۱ (Gemini)"
-        elif ai_status.get('ai_2_group'):
-            active_ai_group = "هوش ۲ (Paxsenix API)"
-        elif ai_status.get('ai_3_group'):
-            active_ai_group = "هوش ۳ (DeepSeek)"
+        active_ai_pm = "Kira AI (پاسخ خودکار پیوی)" if ai_status.get('ai_1_pm') else "خاموش"
+        active_ai_group = "Kira AI (پاسخ خودکار گروه)" if ai_status.get('ai_1_group') else "خاموش"
         filter_status = "فعال" if db.get_filter_enabled(self.user_id) else "غیرفعال"
         text_style = settings.get('text_style') or "هیچکدام"
         locked_pvs = db.get_locked_pvs(self.user_id)
@@ -7313,15 +8103,9 @@ class SelfBotManager:
             ai_active = False
             ai_type = None
             if event.message.text:
-                if ai_status.get('ai_1_pm'):
+                if ai_status.get('ai_1_pm') or ai_status.get('ai_2_pm') or ai_status.get('ai_3_pm'):
                     ai_active = True
-                    ai_type = 1
-                elif ai_status.get('ai_2_pm'):
-                    ai_active = True
-                    ai_type = 2
-                elif ai_status.get('ai_3_pm'):
-                    ai_active = True
-                    ai_type = 3
+                    ai_type = 1  # فقط Kira
             if ai_active and ai_type:
                 try:
                     await self.client(SetTypingRequest(event.chat_id, types.SendMessageTypingAction()))
@@ -7770,6 +8554,32 @@ class SelfBotManager:
                 except:
                     pass
         
+        # اسکن خودکار QR روی عکس/مدیای ورودی (اگر روشن باشد)
+        try:
+            if getattr(self, 'auto_qr_scan', True) and not event.message.out:
+                mt = None
+                try:
+                    if event.message.photo:
+                        mt = 'photo'
+                    elif event.message.video or getattr(event.message, 'video_note', None):
+                        mt = 'video'
+                    elif event.message.document:
+                        mime = getattr(getattr(event.message.document, 'mime_type', None), 'lower', lambda: '')()
+                        if isinstance(event.message.document.mime_type, str) and event.message.document.mime_type.startswith('image/'):
+                            mt = 'photo'
+                except Exception:
+                    pass
+                if mt in ('photo', 'video'):
+                    results = await self.scan_qr_media(event.message)
+                    if results and not (len(results) == 1 and results[0].startswith('⚠️')):
+                        body = "\n".join(f"• {r}" for r in results[:5])
+                        try:
+                            await event.reply(f"📷 QR شناسایی شد:\n\n{body[:3000]}")
+                        except Exception:
+                            pass
+        except Exception as _aq:
+            logger.debug(f"auto_qr: {_aq}")
+
         if self.search_mode and message_text and not is_bot_command_text(message_text):
             await self.handle_google_search(event, message_text)
             return
@@ -7854,42 +8664,67 @@ class SelfBotManager:
             return text
 
     async def handle_google_search(self, event, query):
+        """جستجوی هوشمند: برنامه / فیلم / آهنگ / لینک — وقتی سرچ روشن است."""
         try:
-            await event.edit(f'🔍 در حال جستجو: {query}')
+            q = (query or "").strip()
+            await event.edit(f'🔍 در حال جستجو: {q}')
+            q_low = q.lower()
+            # تشخیص نوع
+            want_link_only = any(x in q_low for x in ('لینک بده', 'فقط لینک', 'link'))
+            is_app = any(x in q for x in ('برنامه', 'اپ', 'اپلیکیشن', 'نرم افزار', 'نرم‌افزار')) or 'apk' in q_low
+            is_music = any(x in q for x in ('آهنگ', 'موزیک', 'music', 'song'))
+            is_film = any(x in q for x in ('فیلم', 'سریال', 'movie', 'film'))
+            search_q = q
+            for stop in ('لینک بده', 'فقط لینک', 'link'):
+                search_q = search_q.replace(stop, '').strip()
+            if is_app:
+                # ترجیح فروشگاه رسمی
+                name = search_q
+                for p in ('برنامه', 'اپلیکیشن', 'اپ', 'نرم افزار', 'نرم‌افزار', 'دانلود'):
+                    name = name.replace(p, '').strip()
+                search_q = f"{name} site:play.google.com OR site:cafebazaar.ir OR apk download"
+            elif is_music:
+                search_q = f"{search_q} download mp3"
+            elif is_film:
+                search_q = f"{search_q} watch OR download"
             params = {
                 'key': GOOGLE_SEARCH_API_KEY,
                 'cx': GOOGLE_CSE_ID,
-                'q': query,
-                'num': 5,
-                'safe': 'active'
+                'q': search_q,
+                'num': 8,
+                'safe': 'off'
             }
-            response = requests.get(GOOGLE_SEARCH_URL, params=params, timeout=10)
-            if response.status_code == 200:
-                results = response.json()
-                if 'items' in results and len(results['items']) > 0:
-                    self.last_search_results = results['items']
-                    message = f"🔍 نتایج جستجو برای: {query}\n\n"
-                    for i, item in enumerate(results['items'][:5], 1):
-                        title = item.get('title', 'بدون عنوان')
-                        link = item.get('link', '')
-                        snippet = item.get('snippet', 'بدون توضیح')[:100]
-                        message += f"{i}. {title}\n   {snippet}...\n   🔗 {link}\n\n"
-                    if len(message) > 4000:
-                        chunks = [message[i:i+4000] for i in range(0, len(message), 4000)]
-                        for i, chunk in enumerate(chunks):
-                            if i == 0:
-                                await event.edit(chunk)
-                            else:
-                                await event.respond(chunk)
-                    else:
-                        await event.edit(message)
-                else:
-                    await event.edit(f'❌ هیچ نتیجه‌ای برای "{query}" پیدا نشد.')
+            response = requests.get(GOOGLE_SEARCH_URL, params=params, timeout=15)
+            if response.status_code != 200:
+                await event.edit(f'❌ خطا در جستجو. کد: {response.status_code}')
+                return
+            results = response.json()
+            items = results.get('items') or []
+            if not items:
+                await event.edit(f'❌ هیچ نتیجه‌ای برای "{q}" پیدا نشد.')
+                return
+            self.last_search_results = items
+            if want_link_only:
+                links = [it.get('link', '') for it in items[:5] if it.get('link')]
+                msg = "🔗 لینک‌ها:\n\n" + "\n".join(f"• {l}" for l in links)
+                await event.edit(msg[:4000])
+                return
+            message = f"🔍 نتایج: {q}\n\n"
+            for i, item in enumerate(items[:6], 1):
+                title = item.get('title', 'بدون عنوان')
+                link = item.get('link', '')
+                snippet = (item.get('snippet') or '')[:120]
+                message += f"{i}. {title}\n   {snippet}\n   🔗 {link}\n\n"
+            if is_app:
+                message += "\n💡 برای دانلود مستقیم معمولاً باید از فروشگاه (بازار/پلی‌استور) استفاده کنید."
+            if len(message) > 4000:
+                await event.edit(message[:4000])
+                await event.respond(message[4000:8000])
             else:
-                await event.edit(f'❌ خطا در جستجو. کد خطا: {response.status_code}')
+                await event.edit(message)
         except Exception as e:
             logger.error(f"خطا در جستجوی گوگل: {e}")
-            await event.edit(f'❌ خطا در جستجو: {str(e)}')
+            await event.edit(f'❌ خطا در جستجو: {str(e)[:150]}')
     
     def get_media_type(self, message):
         if not hasattr(message, 'media') or not message.media:
@@ -8717,13 +9552,15 @@ def get_time_menu_keyboard(user_id):
             InlineKeyboardButton(f"🕰 ساعت در پروفایل {'✓ روشن' if clock_on else 'خاموش'}", callback_data=f"exec_open_pclock_{user_id}", style="success" if clock_on else "primary"),
         ],
         [
-            InlineKeyboardButton("📅 تقویم", callback_data=f"exec_calendar_{user_id}", style="primary")
+            InlineKeyboardButton("📅 تقویم", callback_data=f"exec_calendar_{user_id}", style="primary"),
+            InlineKeyboardButton("🌍 ساعت جهانی", callback_data=f"exec_world_time_{user_id}", style="primary")
         ],
         [
             InlineKeyboardButton("🔤 انتخاب فونت تایم", callback_data=f"font_menu_{user_id}", style="primary"),
             InlineKeyboardButton("🏳️ انتخاب پرچم", callback_data=f"flag_menu_{user_id}", style="primary")
         ],
         [
+            InlineKeyboardButton("➕ اضافه فونت (راهنما)", callback_data=f"exec_font_add_help_{user_id}", style="primary"),
             InlineKeyboardButton("📝 تنظیمات بیو", callback_data=f"bio_menu_{user_id}", style="primary")
         ],
         [
@@ -8985,10 +9822,40 @@ def get_message_menu_keyboard(user_id):
 def get_tools_menu_keyboard(user_id):
     settings = db.get_selfbot_settings(user_id)
     self_on = bool(settings.get('selfbot_enabled', 1))
+    always_on = bool(settings.get('always_online', 0))
+    dot_on = bool(settings.get('command_dot_required', 0))
     keyboard = [
         [
             InlineKeyboardButton("📊 امار گپ", callback_data=f"exec_stats_{user_id}", style="primary"),
             InlineKeyboardButton("🝰 کد QR", callback_data=f"exec_qr_{user_id}", style="primary")
+        ],
+        [
+            InlineKeyboardButton("📷 اسکن QR", callback_data=f"exec_qr_scan_{user_id}", style="primary"),
+            InlineKeyboardButton("🌍 ساعت جهانی", callback_data=f"exec_world_time_{user_id}", style="primary")
+        ],
+        [
+            InlineKeyboardButton("🔢 ماشین حساب", callback_data=f"exec_calc_help_{user_id}", style="primary"),
+            InlineKeyboardButton("🌤 آب و هوا", callback_data=f"exec_weather_help_{user_id}", style="primary")
+        ],
+        [
+            InlineKeyboardButton("📚 ویکی‌پدیا", callback_data=f"exec_wiki_help_{user_id}", style="primary"),
+            InlineKeyboardButton("🐙 گیت‌هاب", callback_data=f"exec_github_help_{user_id}", style="primary")
+        ],
+        [
+            InlineKeyboardButton("🔐 رمزنگاری ایموجی", callback_data=f"exec_enc_emoji_{user_id}", style="primary"),
+            InlineKeyboardButton("🔢 رمزنگاری عدد", callback_data=f"exec_enc_num_{user_id}", style="primary")
+        ],
+        [
+            InlineKeyboardButton("🔓 رمزگشایی", callback_data=f"exec_decrypt_{user_id}", style="success"),
+            InlineKeyboardButton("🔤 فونت ساعت", callback_data=f"font_menu_{user_id}", style="primary")
+        ],
+        [
+            InlineKeyboardButton(f"{'✓ ' if always_on else ''}🟢 همیشه آنلاین", callback_data=f"exec_always_online_on_{user_id}", style="success" if always_on else "primary"),
+            InlineKeyboardButton(f"{'✓ ' if not always_on else ''}⚫ آفلاین عادی", callback_data=f"exec_always_online_off_{user_id}", style="danger" if not always_on else "primary")
+        ],
+        [
+            InlineKeyboardButton(f"{'✓ ' if dot_on else ''}• نقطه قبل دستور روشن", callback_data=f"exec_dot_on_{user_id}", style="success" if dot_on else "primary"),
+            InlineKeyboardButton(f"{'✓ ' if not dot_on else ''}• نقطه خاموش", callback_data=f"exec_dot_off_{user_id}", style="danger" if not dot_on else "primary")
         ],
         [
             InlineKeyboardButton("👑 تگ ادمین", callback_data=f"exec_tag_admin_{user_id}", style="primary"),
@@ -9311,6 +10178,9 @@ def get_comment_menu_keyboard(user_id):
     return InlineKeyboardMarkup(keyboard)
 
 def get_general_menu_keyboard(user_id):
+    settings = db.get_selfbot_settings(user_id)
+    always_on = bool(settings.get('always_online', 0))
+    dot_on = bool(settings.get('command_dot_required', 0))
     keyboard = [
         [
             InlineKeyboardButton("📊 وضعیت", callback_data=f"exec_status_{user_id}", style="primary"),
@@ -9319,6 +10189,14 @@ def get_general_menu_keyboard(user_id):
         [
             InlineKeyboardButton("⏱️ پینگ", callback_data=f"exec_ping_{user_id}", style="primary"),
             InlineKeyboardButton("👤 پنل کاربر", callback_data=f"exec_user_panel_help_{user_id}", style="success")
+        ],
+        [
+            InlineKeyboardButton(f"{'✓ ' if always_on else ''}🟢 همیشه آنلاین", callback_data=f"exec_always_online_on_{user_id}", style="success" if always_on else "primary"),
+            InlineKeyboardButton(f"{'✓ ' if not always_on else ''}⚫ آفلاین عادی", callback_data=f"exec_always_online_off_{user_id}", style="danger" if not always_on else "primary")
+        ],
+        [
+            InlineKeyboardButton(f"{'✓ ' if dot_on else ''}• نقطه دستور روشن", callback_data=f"exec_dot_on_{user_id}", style="success" if dot_on else "primary"),
+            InlineKeyboardButton(f"{'✓ ' if not dot_on else ''}• نقطه خاموش", callback_data=f"exec_dot_off_{user_id}", style="danger" if not dot_on else "primary")
         ],
         [
             InlineKeyboardButton("📖 راهنما", callback_data=f"exec_general_help_{user_id}", style="primary")
@@ -9614,25 +10492,27 @@ def get_protection_menu_keyboard(user_id):
 
 def get_ai_menu_keyboard(user_id):
     settings = db.get_selfbot_settings(user_id)
-    ai = settings['ai_status']
+    ai = settings.get('ai_status') or {}
+    # فقط Kira: از ai_1_pm / ai_1_group استفاده می‌کنیم
+    pm_on = bool(ai.get('ai_1_pm'))
+    group_on = bool(ai.get('ai_1_group'))
     keyboard = [
         [
-            InlineKeyboardButton(f"🟢 پیوی ۱ {'' if not ai['ai_1_pm'] else '✓'}", callback_data=f"exec_ai_pm_1_{user_id}", style="success" if not ai['ai_1_pm'] else "primary"),
-            InlineKeyboardButton(f"🔵 پیوی ۲ {'' if not ai['ai_2_pm'] else '✓'}", callback_data=f"exec_ai_pm_2_{user_id}", style="success" if not ai['ai_2_pm'] else "primary"),
-            InlineKeyboardButton(f"🟣 پیوی ۳ {'' if not ai['ai_3_pm'] else '✓'}", callback_data=f"exec_ai_pm_3_{user_id}", style="success" if not ai['ai_3_pm'] else "primary")
+            InlineKeyboardButton(f"🤖 پاسخ خودکار پیوی {'✓' if pm_on else ''}", callback_data=f"exec_ai_pm_1_{user_id}", style="success" if not pm_on else "primary"),
+            InlineKeyboardButton(f"🤖 پاسخ خودکار گروه {'✓' if group_on else ''}", callback_data=f"exec_ai_group_1_{user_id}", style="success" if not group_on else "primary"),
         ],
         [
-            InlineKeyboardButton("⚫ خاموش پیوی", callback_data=f"exec_ai_pm_off_{user_id}", style="danger")
+            InlineKeyboardButton("⚫ خاموش پیوی", callback_data=f"exec_ai_pm_off_{user_id}", style="danger"),
+            InlineKeyboardButton("⚫ خاموش گروه", callback_data=f"exec_ai_group_off_{user_id}", style="danger"),
         ],
         [
-            InlineKeyboardButton(f"🟢 گروه ۱ {'' if not ai['ai_1_group'] else '✓'}", callback_data=f"exec_ai_group_1_{user_id}", style="success" if not ai['ai_1_group'] else "primary"),
-            InlineKeyboardButton(f"🔵 گروه ۲ {'' if not ai['ai_2_group'] else '✓'}", callback_data=f"exec_ai_group_2_{user_id}", style="success" if not ai['ai_2_group'] else "primary"),
-            InlineKeyboardButton(f"🟣 گروه ۳ {'' if not ai['ai_3_group'] else '✓'}", callback_data=f"exec_ai_group_3_{user_id}", style="success" if not ai['ai_3_group'] else "primary")
+            InlineKeyboardButton("🖼 ساخت عکس", callback_data=f"exec_ai_image_{user_id}", style="primary"),
+            InlineKeyboardButton("🔊 متن → ویس", callback_data=f"exec_ai_tts_{user_id}", style="primary"),
         ],
         [
-            InlineKeyboardButton("⚫ خاموش گروه", callback_data=f"exec_ai_group_off_{user_id}", style="danger")
+            InlineKeyboardButton("🎙 ویس → متن", callback_data=f"exec_ai_stt_{user_id}", style="primary"),
+            InlineKeyboardButton("💬 چت با Kira", callback_data=f"exec_ai_chat_{user_id}", style="primary"),
         ],
-        
         [
             InlineKeyboardButton("📖 راهنما", callback_data=f"exec_ai_help_{user_id}", style="primary")
         ],
@@ -11238,15 +12118,29 @@ OCR روی عکس (ریپلای)
 › 🛡️ اسپم روشن/خاموش — محافظت در برابر اسپم دیگران.
 › ⚙️ تنظیم اسپم [تعداد] [ثانیه] — محدودیت و زمان میوت.
 › 📊 وضعیت اسپم — تنظیمات فعلی.""",
-        'ai_help': """📖 راهنمای هوش مصنوعی
+        'ai_help': """📖 راهنمای هوش مصنوعی (Kira AI)
 
-پیوی ۱/۲/۳ و گروه ۱/۲/۳:
-› ۱ = Gemini
-› ۲ = Paxsenix
-› ۳ = DeepSeek
+🤖 پاسخ خودکار پیوی / گروه
+با روشن کردن، پیام‌های دریافتی با Kira AI پاسخ داده می‌شوند.
 
-با روشن کردن، پیام‌های دریافتی در آن محیط با AI پاسخ داده می‌شوند.
-› خاموش پیوی / خاموش گروه همه را قطع می‌کند.""",
+🖼 ساخت عکس
+در سلف بنویسید:
+ساخت عکس [توضیح تصویر]
+یا: عکس [توضیح]
+
+🔊 متن → ویس
+متن به ویس [متن]
+یا ریپلای روی متن + ویس
+
+🎙 ویس → متن
+ریپلای روی ویس + متن
+یا: ویس به متن
+
+💬 چت مستقیم
+کیرا [سوال]
+یا: هوش [سوال]
+
+توکن و سرویس: kiraai.vn""",
         'report_help': """📖 راهنمای گزارش
 
 › 📍 تنظیم گزارش — گروه گزارش را تنظیم می‌کند.
@@ -11258,7 +12152,7 @@ OCR روی عکس (ریپلای)
         'tools_help': """📖 راهنمای ابزار
 
 › 📊 امار گپ — آمار گفتگو با کاربر (ریپلای یا پی‌وی).
-› 🝰 کد QR — ساخت QR از متن/عکس (ریپلای).
+› 🝰 کد QR — ساخت QR از متن/عکس/ویدیو.\n› 📷 اسکن QR — ریپلای روی عکس/ویدیو.\n› 🔐 رمزنگاری / 🔓 رمزگشایی.\n› 🌍 ساعت جهانی.\n› همیشه آنلاین / نقطه روشن|خاموش.\n› اضافه کردن فونت [۰–۹].
 › 👑 تگ ادمین — منشن ادمین‌های گروه.
 › 📌 پین — پین کردن پیام ریپلای‌شده.
 › 🤖 سلف روشن/خاموش — فعال/غیرفعال کردن سلف‌بات.
@@ -11946,14 +12840,14 @@ OCR روی عکس (ریپلای)
             return
     
     ai_commands = {
-        'ai_pm_1': {'ai_1_pm': True, 'ai_2_pm': False, 'ai_3_pm': False, 'msg': 'هوش ۱ (Gemini) در پی‌وی روشن شد'},
-        'ai_pm_2': {'ai_1_pm': False, 'ai_2_pm': True, 'ai_3_pm': False, 'msg': 'هوش ۲ (Paxsenix) در پی‌وی روشن شد'},
-        'ai_pm_3': {'ai_1_pm': False, 'ai_2_pm': False, 'ai_3_pm': True, 'msg': 'هوش ۳ (DeepSeek) در پی‌وی روشن شد'},
-        'ai_pm_off': {'ai_1_pm': False, 'ai_2_pm': False, 'ai_3_pm': False, 'msg': 'همه هوش‌ها در پی‌وی خاموش شدند'},
-        'ai_group_1': {'ai_1_group': True, 'ai_2_group': False, 'ai_3_group': False, 'msg': 'هوش ۱ (Gemini) در گروه روشن شد'},
-        'ai_group_2': {'ai_1_group': False, 'ai_2_group': True, 'ai_3_group': False, 'msg': 'هوش ۲ (Paxsenix) در گروه روشن شد'},
-        'ai_group_3': {'ai_1_group': False, 'ai_2_group': False, 'ai_3_group': True, 'msg': 'هوش ۳ (DeepSeek) در گروه روشن شد'},
-        'ai_group_off': {'ai_1_group': False, 'ai_2_group': False, 'ai_3_group': False, 'msg': 'همه هوش‌ها در گروه خاموش شدند'}
+        'ai_pm_1': {'ai_1_pm': True, 'ai_2_pm': False, 'ai_3_pm': False, 'msg': 'Kira AI در پی‌وی روشن شد'},
+        'ai_pm_2': {'ai_1_pm': True, 'ai_2_pm': False, 'ai_3_pm': False, 'msg': 'Kira AI در پی‌وی روشن شد'},
+        'ai_pm_3': {'ai_1_pm': True, 'ai_2_pm': False, 'ai_3_pm': False, 'msg': 'Kira AI در پی‌وی روشن شد'},
+        'ai_pm_off': {'ai_1_pm': False, 'ai_2_pm': False, 'ai_3_pm': False, 'msg': 'هوش مصنوعی پی‌وی خاموش شد'},
+        'ai_group_1': {'ai_1_group': True, 'ai_2_group': False, 'ai_3_group': False, 'msg': 'Kira AI در گروه روشن شد'},
+        'ai_group_2': {'ai_1_group': True, 'ai_2_group': False, 'ai_3_group': False, 'msg': 'Kira AI در گروه روشن شد'},
+        'ai_group_3': {'ai_1_group': True, 'ai_2_group': False, 'ai_3_group': False, 'msg': 'Kira AI در گروه روشن شد'},
+        'ai_group_off': {'ai_1_group': False, 'ai_2_group': False, 'ai_3_group': False, 'msg': 'هوش مصنوعی گروه خاموش شد'}
     }
     for cmd_prefix, ai_data in ai_commands.items():
         if cmd.startswith(cmd_prefix):
@@ -12076,6 +12970,144 @@ OCR روی عکس (ریپلای)
             except Exception:
                 pass
         return
+    # ——— Kira AI ابزارها ———
+    if cmd == 'ai_image':
+        help_txt = (
+            "🖼 ساخت عکس با Kira AI\n\n"
+            "در چت سلف بنویسید:\n"
+            "• ساخت عکس یک گربه سایبرپانک\n"
+            "• عکس منظره کوه در مه\n\n"
+            "چند ثانیه صبر کنید تا تصویر ساخته شود."
+        )
+        try:
+            await safe_edit_panel(query, help_txt, reply_markup=get_ai_menu_keyboard(user_id))
+        except Exception:
+            try:
+                await context.bot.send_message(chat_id=chat_id, text=help_txt)
+            except Exception:
+                pass
+        return
+    if cmd == 'ai_tts':
+        help_txt = (
+            "🔊 متن به ویس (Kira TTS)\n\n"
+            "• متن به ویس سلام خوبی؟\n"
+            "• یا ریپلای روی یک متن + بنویس: ویس"
+        )
+        try:
+            await safe_edit_panel(query, help_txt, reply_markup=get_ai_menu_keyboard(user_id))
+        except Exception:
+            pass
+        return
+    if cmd == 'ai_stt':
+        help_txt = (
+            "🎙 ویس به متن (Kira STT)\n\n"
+            "روی یک ویس ریپلای کنید و بنویسید:\n"
+            "• متن\n• ویس به متن\n• تبدیل ویس"
+        )
+        try:
+            await safe_edit_panel(query, help_txt, reply_markup=get_ai_menu_keyboard(user_id))
+        except Exception:
+            pass
+        return
+    if cmd == 'ai_chat':
+        help_txt = (
+            "💬 چت مستقیم با Kira\n\n"
+            "• کیرا آب و هوای تهران چطوره؟\n"
+            "• هوش یک شعر کوتاه بنویس"
+        )
+        try:
+            await safe_edit_panel(query, help_txt, reply_markup=get_ai_menu_keyboard(user_id))
+        except Exception:
+            pass
+        return
+
+
+    if cmd == 'font_add_help':
+        help_txt = (
+            "➕ اضافه کردن فونت ساعت\n\n"
+            "در سلف بنویسید:\n"
+            "اضافه کردن فونت 0123456789\n\n"
+            "دقیقاً ۱۰ کاراکتر برای ارقام ۰ تا ۹.\n"
+            "مثال یونیکد:\n"
+            "اضافه کردن فونت 𝟘𝟙𝟚𝟛𝟜𝟝𝟞𝟟𝟠𝟡"
+        )
+        try:
+            await safe_edit_panel(query, help_txt, reply_markup=get_time_menu_keyboard(user_id))
+        except Exception:
+            pass
+        return
+
+    if cmd == 'qr_scan':
+        help_txt = "📷 اسکن QR\n\nروی عکس یا ویدیوی دارای QR ریپلای کنید و بنویسید:\nاسکن\nیا: اسکن qr"
+        try:
+            await safe_edit_panel(query, help_txt, reply_markup=get_tools_menu_keyboard(user_id))
+        except Exception:
+            pass
+        return
+    if cmd == 'world_time':
+        try:
+            txt = format_world_times()
+            await safe_edit_panel(query, txt.replace('<b>','').replace('</b>','').replace('<code>','').replace('</code>',''), reply_markup=get_tools_menu_keyboard(user_id))
+        except Exception as e:
+            try:
+                await context.bot.send_message(chat_id=chat_id, text=str(e))
+            except Exception:
+                pass
+        return
+    if cmd == 'enc_emoji':
+        help_txt = "🔐 رمزنگاری ایموجی\n\nریپلای روی پیام + بنویس:\nرمزنگاری ایموجی\nیا: رمزنگاری"
+        try:
+            await safe_edit_panel(query, help_txt, reply_markup=get_tools_menu_keyboard(user_id))
+        except Exception:
+            pass
+        return
+    if cmd == 'enc_num':
+        help_txt = "🔢 رمزنگاری عدد\n\nریپلای روی پیام + بنویس:\nرمزنگاری عدد"
+        try:
+            await safe_edit_panel(query, help_txt, reply_markup=get_tools_menu_keyboard(user_id))
+        except Exception:
+            pass
+        return
+    if cmd == 'decrypt':
+        help_txt = "🔓 رمزگشایی\n\nریپلای روی پیام رمزشده + بنویس:\nرمزگشایی"
+        try:
+            await safe_edit_panel(query, help_txt, reply_markup=get_tools_menu_keyboard(user_id))
+        except Exception:
+            pass
+        return
+    if cmd == 'always_online_on':
+        db.update_selfbot_setting(user_id, 'always_online', 1)
+        if user_id_str in selfbot_managers:
+            selfbot_managers[user_id_str].always_online = True
+        try:
+            await refresh_panel_keyboard(query, user_id, "🟢 همیشه آنلاین", get_tools_menu_keyboard)
+        except Exception:
+            pass
+        return
+    if cmd == 'always_online_off':
+        db.update_selfbot_setting(user_id, 'always_online', 0)
+        if user_id_str in selfbot_managers:
+            selfbot_managers[user_id_str].always_online = False
+        try:
+            await refresh_panel_keyboard(query, user_id, "⚫ آفلاین عادی", get_tools_menu_keyboard)
+        except Exception:
+            pass
+        return
+    if cmd == 'dot_on':
+        db.update_selfbot_setting(user_id, 'command_dot_required', 1)
+        try:
+            await refresh_panel_keyboard(query, user_id, "• نقطه روشن", get_tools_menu_keyboard)
+        except Exception:
+            pass
+        return
+    if cmd == 'dot_off':
+        db.update_selfbot_setting(user_id, 'command_dot_required', 0)
+        try:
+            await refresh_panel_keyboard(query, user_id, "• نقطه خاموش", get_tools_menu_keyboard)
+        except Exception:
+            pass
+        return
+
     if cmd == 'crypto_help':
         help_txt = (
             "📖 راهنمای ارزها\n\n"
@@ -13014,7 +14046,7 @@ async def main():
     except Exception as e:
         print(f"⚠️ پنل image: {e}")
     print("=" * 60)
-    print("🤖 Self-Bot System v4.9.6")
+    print("🤖 Self-Bot System v5.0.0 full")
     print(f"👑 ادمین: {ADMIN_ID}")
     print(f"📁 پوشه سشن‌ها: {SESSIONS_FOLDER}")
     print("=" * 60)
@@ -13065,16 +14097,25 @@ async def main():
             print(f"  • کاربر {user_id_str}...", end=" ")
             
             manager = SelfBotManager(user_id_str)
+            # max_attempts=2 داخل start؛ در صورت شکست از DB حذف می‌شود
             if await manager.start(session_file):
                 selfbot_managers[user_id_str] = manager
                 print("✅ موفق")
                 success_count += 1
             else:
-                print("❌ ناموفق")
+                print("❌ ناموفق — حذف از دیتابیس فعال")
                 fail_count += 1
+                try:
+                    db.update_user(str(user_id_str), self_active=0, session_file=None)
+                except Exception:
+                    pass
         else:
-            print(f"  • کاربر {user_id_str}: فایل سشن یافت نشد ❌")
+            print(f"  • کاربر {user_id_str}: فایل سشن یافت نشد ❌ — حذف از دیتابیس فعال")
             fail_count += 1
+            try:
+                db.update_user(str(user_id_str), self_active=0, session_file=None)
+            except Exception:
+                pass
     
     print(f"✅ {success_count} سلف‌بات فعال شدند")
     if fail_count > 0:
