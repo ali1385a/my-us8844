@@ -12,3 +12,7 @@ Pillow
 psutil
 persiantools
 currency-converter
+pyzbar
+numpy
+matplotlib
+imageio-ffmpeg
