@@ -116,7 +116,7 @@ def home():
     return jsonify({
         "status": "running",
         "bot": "VROOM",
-        "version": "5.1.1"
+        "version": "5.2.0"
     })
 
 @flask_app.route('/health')
@@ -977,7 +977,7 @@ SPAM_MESSAGES = [
     "کص ننت تو فروشگاه تنگستن کس داد، تنگستن کس شد و شکست",
 ]
 
-BOT_VERSION = "5.1.1"
+BOT_VERSION = "5.2.0"
 BOT_CREATOR = "VROOM"
 PANEL_HEADER_IMAGE = "panel_header.png"  # تصویر بالای پنل (تصویر جدید VROOM)
 
@@ -6818,9 +6818,29 @@ class SelfBotManager:
                     await event.edit("❌ دانلود ویدیو ناموفق")
                     return
                 out = os.path.join(tempfile.gettempdir(), f"vnote_{self.user_id}.mp4")
-                # مربع حداکثر 384px، حداکثر حدود 60 ثانیه
+                ff = find_ffmpeg_bin()
+                if not ff:
+                    # تلاش نصب imageio-ffmpeg در runtime
+                    try:
+                        import subprocess as _sp
+                        _sp.run([sys.executable, "-m", "pip", "install", "imageio-ffmpeg", "-q"], timeout=90, capture_output=True)
+                        ff = find_ffmpeg_bin()
+                    except Exception:
+                        pass
+                if not ff:
+                    await event.edit(
+                        "❌ ffmpeg روی سرور نیست.\n"
+                        "روی سرور نصب کنید: apt-get install -y ffmpeg\n"
+                        "یا: pip install imageio-ffmpeg"
+                    )
+                    try:
+                        if src and os.path.exists(src):
+                            os.remove(src)
+                    except Exception:
+                        pass
+                    return
                 cmd_ff = [
-                    "ffmpeg", "-y", "-i", src,
+                    ff, "-y", "-i", src,
                     "-t", "60",
                     "-vf", "scale=384:384:force_original_aspect_ratio=increase,crop=384:384",
                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
@@ -6836,7 +6856,7 @@ class SelfBotManager:
                     except Exception:
                         pass
                 else:
-                    await event.edit("❌ تبدیل ناموفق — ffmpeg را نصب کنید")
+                    await event.edit("❌ تبدیل ناموفق بود. فایل ویدیو را کوتاه‌تر امتحان کنید.")
                 try:
                     os.remove(src)
                 except Exception:
@@ -8326,8 +8346,15 @@ class SelfBotManager:
                         await event.reply(text, formatting_entities=entities if entities else None)
                     elif response and str(response).startswith("ERR:"):
                         err = str(response)[4:]
-                        if "402" in err or "payment" in err.lower() or "under_maintenance" in err.lower() or "balance" in err.lower() or "current_vnd" in err.lower():
-                            await event.reply("❌ Kira AI: موجودی حساب یا مدل در دسترس نیست.\nتوکن را در kiraai.vn شارژ کنید یا مدل فعال انتخاب کنید.")
+                        el = err.lower()
+                        if any(x in el for x in ("insufficient", "vnd_balance", "quota", "402", "payment", "balance", "current_vnd", "under_maintenance", "exhausted")):
+                            await event.reply(
+                                "❌ موجودی کیف‌پول Kira تمام شده (0 VND).\n\n"
+                                "برای استفاده از چت / ساخت عکس / صدا:\n"
+                                "۱) برو به https://kiraai.vn\n"
+                                "۲) کیف‌پول را شارژ کن\n"
+                                "۳) دوباره امتحان کن"
+                            )
                         else:
                             await event.reply(f"❌ خطا از Kira:\n{err[:500]}")
                     else:
@@ -9732,63 +9759,115 @@ async def refresh_panel_keyboard(query, user_id, menu_text, keyboard_func):
         except Exception:
             pass
 
+
+def get_btn_styles(user_id):
+    """دیکشنری استایل دکمه‌های منوی اصلی برای کاربر"""
+    try:
+        settings = db.get_selfbot_settings(user_id)
+        styles = settings.get("btn_styles") or {}
+        if isinstance(styles, str):
+            import json as _json
+            styles = _json.loads(styles)
+        if not isinstance(styles, dict):
+            styles = {}
+    except Exception:
+        styles = {}
+    defaults = {
+        "time": "primary", "animation": "primary", "user": "primary",
+        "lock": "danger", "comment": "success", "general": "primary",
+        "action": "primary", "games": "primary", "translate": "primary",
+        "google": "primary", "info": "primary", "profile": "primary",
+        "style": "primary", "message": "primary", "reaction": "primary",
+        "spam": "danger", "change": "primary", "enemy": "danger",
+        "filter": "danger", "protection": "primary", "ai": "success",
+        "report": "primary", "tools": "primary", "crypto": "success",
+        "monshi": "success", "mention": "primary", "fortune": "primary",
+        "secret": "success", "widgets": "primary", "backup": "success",
+        "btnset": "primary",
+    }
+    for k, v in defaults.items():
+        if k not in styles or styles[k] not in ("primary", "success", "danger"):
+            styles[k] = v
+    return styles
+
+def cycle_btn_style(user_id, key):
+    order = ["primary", "success", "danger"]
+    styles = get_btn_styles(user_id)
+    cur = styles.get(key, "primary")
+    nxt = order[(order.index(cur) + 1) % 3] if cur in order else "primary"
+    styles[key] = nxt
+    try:
+        import json as _json
+        db.update_selfbot_setting(user_id, "btn_styles", _json.dumps(styles, ensure_ascii=False))
+    except Exception as e:
+        logger.error(f"cycle_btn_style: {e}")
+    return nxt
+
+_STYLE_LABEL = {"primary": "🔵 آبی", "success": "🟢 سبز", "danger": "🔴 قرمز"}
+
+
 def get_main_panel_keyboard(user_id):
+    s = get_btn_styles(user_id)
     keyboard = [
         [
-            InlineKeyboardButton("⏰ زمان و پروفایل", callback_data=f"time_menu_{user_id}", style="primary"),
-            InlineKeyboardButton("✨ انیمیشن", callback_data=f"animation_menu_{user_id}", style="primary"),
-            InlineKeyboardButton("👤 کاربران", callback_data=f"user_menu_{user_id}", style="primary")
+            InlineKeyboardButton("⏰ زمان و پروفایل", callback_data=f"time_menu_{user_id}", style=s["time"]),
+            InlineKeyboardButton("✨ انیمیشن", callback_data=f"animation_menu_{user_id}", style=s["animation"]),
+            InlineKeyboardButton("👤 کاربران", callback_data=f"user_menu_{user_id}", style=s["user"]),
         ],
         [
-            InlineKeyboardButton("🔒 قفل رسانه", callback_data=f"lock_menu_{user_id}", style="danger"),
-            InlineKeyboardButton("💬 کامنت", callback_data=f"comment_menu_{user_id}", style="success"),
-            InlineKeyboardButton("📌 عمومی", callback_data=f"general_menu_{user_id}", style="primary")
+            InlineKeyboardButton("🔒 قفل رسانه", callback_data=f"lock_menu_{user_id}", style=s["lock"]),
+            InlineKeyboardButton("💬 کامنت", callback_data=f"comment_menu_{user_id}", style=s["comment"]),
+            InlineKeyboardButton("📌 عمومی", callback_data=f"general_menu_{user_id}", style=s["general"]),
         ],
         [
-            InlineKeyboardButton("🎭 اکشن", callback_data=f"action_menu_{user_id}", style="primary"),
-            InlineKeyboardButton("🎮 بازی‌ها", callback_data=f"games_menu_{user_id}", style="primary"),
-            InlineKeyboardButton("🌐 ترجمه", callback_data=f"translate_menu_{user_id}", style="primary")
+            InlineKeyboardButton("🎭 اکشن", callback_data=f"action_menu_{user_id}", style=s["action"]),
+            InlineKeyboardButton("🎮 بازی‌ها", callback_data=f"games_menu_{user_id}", style=s["games"]),
+            InlineKeyboardButton("🌐 ترجمه", callback_data=f"translate_menu_{user_id}", style=s["translate"]),
         ],
         [
-            InlineKeyboardButton("🔎 گوگل", callback_data=f"google_menu_{user_id}", style="primary"),
-            InlineKeyboardButton("ℹ️ اطلاعاتی", callback_data=f"info_menu_{user_id}", style="primary"),
-            InlineKeyboardButton("🖼 پروفایل", callback_data=f"profile_menu_{user_id}", style="primary")
+            InlineKeyboardButton("🔎 گوگل", callback_data=f"google_menu_{user_id}", style=s["google"]),
+            InlineKeyboardButton("ℹ️ اطلاعاتی", callback_data=f"info_menu_{user_id}", style=s["info"]),
+            InlineKeyboardButton("🖼 پروفایل", callback_data=f"profile_menu_{user_id}", style=s["profile"]),
         ],
         [
-            InlineKeyboardButton("✍️ استایل متن", callback_data=f"style_menu_{user_id}", style="primary"),
-            InlineKeyboardButton("📨 مدیریت پیام", callback_data=f"message_menu_{user_id}", style="primary"),
-            InlineKeyboardButton("👍 ریکشن", callback_data=f"reaction_menu_{user_id}", style="primary")
+            InlineKeyboardButton("✍️ استایل متن", callback_data=f"style_menu_{user_id}", style=s["style"]),
+            InlineKeyboardButton("📨 مدیریت پیام", callback_data=f"message_menu_{user_id}", style=s["message"]),
+            InlineKeyboardButton("👍 ریکشن", callback_data=f"reaction_menu_{user_id}", style=s["reaction"]),
         ],
         [
-            InlineKeyboardButton("💣 اسپم", callback_data=f"spam_menu_{user_id}", style="danger"),
-            InlineKeyboardButton("✏️ تغییر پروفایل", callback_data=f"change_menu_{user_id}", style="primary"),
-            InlineKeyboardButton("👹 دشمنان", callback_data=f"enemy_menu_{user_id}", style="danger")
+            InlineKeyboardButton("💣 اسپم", callback_data=f"spam_menu_{user_id}", style=s["spam"]),
+            InlineKeyboardButton("✏️ تغییر پروفایل", callback_data=f"change_menu_{user_id}", style=s["change"]),
+            InlineKeyboardButton("👹 دشمنان", callback_data=f"enemy_menu_{user_id}", style=s["enemy"]),
         ],
         [
-            InlineKeyboardButton("🚫 فیلتر کلمات", callback_data=f"filter_menu_{user_id}", style="danger"),
-            InlineKeyboardButton("🛡 حفاظت اسپم", callback_data=f"protection_menu_{user_id}", style="primary"),
-            InlineKeyboardButton("🤖 هوش مصنوعی", callback_data=f"ai_menu_{user_id}", style="primary")
+            InlineKeyboardButton("🚫 فیلتر کلمات", callback_data=f"filter_menu_{user_id}", style=s["filter"]),
+            InlineKeyboardButton("🛡 حفاظت اسپم", callback_data=f"protection_menu_{user_id}", style=s["protection"]),
+            InlineKeyboardButton("🤖 هوش مصنوعی", callback_data=f"ai_menu_{user_id}", style=s["ai"]),
         ],
         [
-            InlineKeyboardButton("📣 گزارش", callback_data=f"report_menu_{user_id}", style="primary"),
-            InlineKeyboardButton("🛠 ابزار", callback_data=f"tools_menu_{user_id}", style="primary"),
-            InlineKeyboardButton("💰 ارزها", callback_data=f"crypto_menu_{user_id}", style="success")
+            InlineKeyboardButton("📣 گزارش", callback_data=f"report_menu_{user_id}", style=s["report"]),
+            InlineKeyboardButton("🛠 ابزار", callback_data=f"tools_menu_{user_id}", style=s["tools"]),
+            InlineKeyboardButton("💰 ارزها", callback_data=f"crypto_menu_{user_id}", style=s["crypto"]),
         ],
         [
-            InlineKeyboardButton("🗣 منشی هوشمند", callback_data=f"monshi_menu_{user_id}", style="success"),
-            InlineKeyboardButton("📢 تگ همه", callback_data=f"mention_menu_{user_id}", style="primary"),
-            InlineKeyboardButton("🔮 فال", callback_data=f"fortune_menu_{user_id}", style="primary")
+            InlineKeyboardButton("🗣 منشی هوشمند", callback_data=f"monshi_menu_{user_id}", style=s["monshi"]),
+            InlineKeyboardButton("📢 تگ همه", callback_data=f"mention_menu_{user_id}", style=s["mention"]),
+            InlineKeyboardButton("🔮 فال", callback_data=f"fortune_menu_{user_id}", style=s["fortune"]),
         ],
         [
-            InlineKeyboardButton("🔐 متن رمزی", callback_data=f"secret_menu_{user_id}", style="success"),
-            InlineKeyboardButton("🧩 ابزارک‌ها", callback_data=f"widgets_menu_{user_id}", style="primary"),
-            InlineKeyboardButton("📦 بکاپ‌گیری", callback_data=f"backup_menu_{user_id}", style="success"),
+            InlineKeyboardButton("🔐 متن رمزی", callback_data=f"secret_menu_{user_id}", style=s["secret"]),
+            InlineKeyboardButton("🧩 ابزارک‌ها", callback_data=f"widgets_menu_{user_id}", style=s["widgets"]),
+            InlineKeyboardButton("📦 بکاپ‌گیری", callback_data=f"backup_menu_{user_id}", style=s["backup"]),
         ],
         [
-            InlineKeyboardButton("✖️ بستن پنل", callback_data=f"close_panel_{user_id}", style="danger")
-        ]
+            InlineKeyboardButton("🎨 تنظیم دکمه‌ها", callback_data=f"btnset_menu_{user_id}", style=s["btnset"]),
+        ],
+        [
+            InlineKeyboardButton("✖️ بستن پنل", callback_data=f"close_panel_{user_id}", style="danger"),
+        ],
     ]
     return InlineKeyboardMarkup(keyboard)
+
 
 def get_fortune_menu_keyboard(user_id):
     keyboard = [
@@ -10088,44 +10167,50 @@ def get_message_menu_keyboard(user_id):
 def get_tools_menu_keyboard(user_id):
     settings = db.get_selfbot_settings(user_id)
     self_on = bool(settings.get('selfbot_enabled', 1))
+    learn_on = False
+    try:
+        learn_on = bool(db.get_learning_enabled(user_id))
+    except Exception:
+        pass
     keyboard = [
         [
-            InlineKeyboardButton("📊 امار گپ", callback_data=f"exec_stats_{user_id}"),
-            InlineKeyboardButton("🝰 کد QR", callback_data=f"exec_qr_{user_id}")
+            InlineKeyboardButton("📊 آمار گپ", callback_data=f"exec_stats_{user_id}", style="primary"),
+            InlineKeyboardButton("🝰 کد QR", callback_data=f"exec_qr_{user_id}", style="success"),
         ],
         [
-            InlineKeyboardButton("👑 تگ ادمین", callback_data=f"exec_tag_admin_{user_id}"),
-            InlineKeyboardButton("📌 پین", callback_data=f"exec_pin_{user_id}")
+            InlineKeyboardButton("👑 تگ ادمین", callback_data=f"exec_tag_admin_{user_id}", style="primary"),
+            InlineKeyboardButton("📌 پین", callback_data=f"exec_pin_{user_id}", style="primary"),
         ],
         [
-            InlineKeyboardButton(f"{'✓ ' if self_on else ''}🤖 سلف روشن", callback_data=f"exec_self_on_{user_id}"),
-            InlineKeyboardButton(f"{'✓ ' if not self_on else ''}⛔ سلف خاموش", callback_data=f"exec_self_off_{user_id}")
+            InlineKeyboardButton(f"{'✓ ' if self_on else ''}🤖 سلف روشن", callback_data=f"exec_self_on_{user_id}", style="success" if self_on else "primary"),
+            InlineKeyboardButton(f"{'✓ ' if not self_on else ''}⛔ سلف خاموش", callback_data=f"exec_self_off_{user_id}", style="danger" if not self_on else "primary"),
         ],
         [
-            InlineKeyboardButton("🎨 ساخت استیکر", callback_data=f"exec_make_sticker_{user_id}"),
-            InlineKeyboardButton("🔢 ایدی عددی", callback_data=f"exec_numeric_id_help_{user_id}"),
+            InlineKeyboardButton("🎨 ساخت استیکر", callback_data=f"exec_make_sticker_{user_id}", style="success"),
+            InlineKeyboardButton("🔢 آیدی عددی", callback_data=f"exec_numeric_id_help_{user_id}", style="primary"),
         ],
         [
-            InlineKeyboardButton("🎙 ویدیو → ویس", callback_data=f"exec_video_to_voice_{user_id}"),
-            InlineKeyboardButton("🔵 ویدیو گرد", callback_data=f"exec_video_note_help_{user_id}"),
+            InlineKeyboardButton("🎙 ویدیو → ویس", callback_data=f"exec_video_to_voice_{user_id}", style="primary"),
+            InlineKeyboardButton("🔵 ویدیو گرد", callback_data=f"exec_video_note_help_{user_id}", style="success"),
         ],
         [
-            InlineKeyboardButton(f"{'✓ ' if db.get_learning_enabled(user_id) else ''}🧠 یادگیری روشن", callback_data=f"exec_learning_on_{user_id}"),
-            InlineKeyboardButton(f"{'✓ ' if not db.get_learning_enabled(user_id) else ''}🧠 یادگیری خاموش", callback_data=f"exec_learning_off_{user_id}"),
+            InlineKeyboardButton(f"{'✓ ' if learn_on else ''}🧠 یادگیری روشن", callback_data=f"exec_learning_on_{user_id}", style="success" if learn_on else "primary"),
+            InlineKeyboardButton(f"{'✓ ' if not learn_on else ''}🧠 یادگیری خاموش", callback_data=f"exec_learning_off_{user_id}", style="danger" if not learn_on else "primary"),
         ],
         [
-            InlineKeyboardButton("📋 لیست یادگیری", callback_data=f"exec_learning_list_{user_id}"),
-            InlineKeyboardButton("📖 راهنما یادگیری", callback_data=f"exec_learning_help_{user_id}"),
+            InlineKeyboardButton("📋 لیست یادگیری", callback_data=f"exec_learning_list_{user_id}", style="primary"),
+            InlineKeyboardButton("📖 راهنما یادگیری", callback_data=f"exec_learning_help_{user_id}", style="primary"),
         ],
         [
-            InlineKeyboardButton("🗑 ریست دیتابیس", callback_data=f"exec_reset_db_{user_id}"),
-            InlineKeyboardButton("📖 راهنما ابزار", callback_data=f"exec_tools_help_{user_id}")
+            InlineKeyboardButton("🗑 ریست دیتابیس", callback_data=f"exec_reset_db_{user_id}", style="danger"),
+            InlineKeyboardButton("📖 راهنما ابزار", callback_data=f"exec_tools_help_{user_id}", style="primary"),
         ],
         [
-            InlineKeyboardButton("⚈ بازگشت", callback_data=f"back_main")
-        ]
+            InlineKeyboardButton("⚈ بازگشت", callback_data=f"back_main", style="danger"),
+        ],
     ]
     return InlineKeyboardMarkup(keyboard)
+
 
 
 def get_backup_menu_keyboard(user_id):
@@ -10527,20 +10612,21 @@ def get_google_menu_keyboard(user_id):
         pass
     keyboard = [
         [
-            InlineKeyboardButton(f"{'✓ ' if search_on else ''}🔎 سرچ روشن", callback_data=f"exec_search_on_{user_id}"),
-            InlineKeyboardButton(f"{'✓ ' if not search_on else ''}🔎 سرچ خاموش", callback_data=f"exec_search_off_{user_id}"),
+            InlineKeyboardButton(f"{'✓ ' if search_on else ''}🔎 سرچ روشن", callback_data=f"exec_search_on_{user_id}", style="success" if search_on else "primary"),
+            InlineKeyboardButton(f"{'✓ ' if not search_on else ''}🔎 سرچ خاموش", callback_data=f"exec_search_off_{user_id}", style="danger" if not search_on else "primary"),
         ],
         [
-            InlineKeyboardButton("📥 دانلود برنامه", callback_data=f"exec_app_download_help_{user_id}"),
+            InlineKeyboardButton("📥 دانلود برنامه", callback_data=f"exec_app_download_help_{user_id}", style="success"),
         ],
         [
-            InlineKeyboardButton("📖 راهنما", callback_data=f"exec_google_help_{user_id}"),
+            InlineKeyboardButton("📖 راهنما", callback_data=f"exec_google_help_{user_id}", style="primary"),
         ],
         [
-            InlineKeyboardButton("⚈ بازگشت", callback_data=f"back_main"),
+            InlineKeyboardButton("⚈ بازگشت", callback_data=f"back_main", style="danger"),
         ],
     ]
     return InlineKeyboardMarkup(keyboard)
+
 
 
 def get_profile_menu_keyboard(user_id):
@@ -10742,49 +10828,82 @@ def get_protection_menu_keyboard(user_id):
     return InlineKeyboardMarkup(keyboard)
 
 
+
+def get_btnset_menu_keyboard(user_id):
+    s = get_btn_styles(user_id)
+    labels = [
+        ("time", "⏰ زمان"), ("animation", "✨ انیمیشن"), ("user", "👤 کاربران"),
+        ("lock", "🔒 قفل"), ("comment", "💬 کامنت"), ("general", "📌 عمومی"),
+        ("action", "🎭 اکشن"), ("games", "🎮 بازی"), ("translate", "🌐 ترجمه"),
+        ("google", "🔎 گوگل"), ("info", "ℹ️ اطلاعات"), ("profile", "🖼 پروفایل"),
+        ("style", "✍️ استایل"), ("message", "📨 پیام"), ("reaction", "👍 ریکشن"),
+        ("spam", "💣 اسپم"), ("change", "✏️ تغییر"), ("enemy", "👹 دشمن"),
+        ("filter", "🚫 فیلتر"), ("protection", "🛡 حفاظت"), ("ai", "🤖 هوش"),
+        ("report", "📣 گزارش"), ("tools", "🛠 ابزار"), ("crypto", "💰 ارز"),
+        ("monshi", "🗣 منشی"), ("mention", "📢 تگ"), ("fortune", "🔮 فال"),
+        ("secret", "🔐 رمز"), ("widgets", "🧩 ابزارک"), ("backup", "📦 بکاپ"),
+        ("btnset", "🎨 تنظیم"),
+    ]
+    keyboard = []
+    row = []
+    for key, title in labels:
+        st = s.get(key, "primary")
+        mark = {"primary": "🔵", "success": "🟢", "danger": "🔴"}.get(st, "🔵")
+        row.append(InlineKeyboardButton(f"{mark} {title}", callback_data=f"exec_btnstyle_{key}_{user_id}", style=st))
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    keyboard.append([InlineKeyboardButton("♻️ ریست رنگ‌ها", callback_data=f"exec_btnstyle_reset_{user_id}", style="danger")])
+    keyboard.append([InlineKeyboardButton("📖 راهنما", callback_data=f"exec_btnset_help_{user_id}", style="primary")])
+    keyboard.append([InlineKeyboardButton("⚈ بازگشت", callback_data=f"back_main", style="danger")])
+    return InlineKeyboardMarkup(keyboard)
+
+
 def get_crypto_text_menu_keyboard(user_id):
-    """رمزنگاری / رمزگشایی"""
     keyboard = [
         [
-            InlineKeyboardButton("🔐 رمزنگاری ایموجی", callback_data=f"exec_enc_emoji_{user_id}"),
-            InlineKeyboardButton("🔢 رمزنگاری عدد", callback_data=f"exec_enc_num_{user_id}"),
+            InlineKeyboardButton("🔐 رمزنگاری ایموجی", callback_data=f"exec_enc_emoji_{user_id}", style="success"),
+            InlineKeyboardButton("🔢 رمزنگاری عدد", callback_data=f"exec_enc_num_{user_id}", style="primary"),
         ],
         [
-            InlineKeyboardButton("🔓 رمزگشایی", callback_data=f"exec_decrypt_{user_id}"),
+            InlineKeyboardButton("🔓 رمزگشایی", callback_data=f"exec_decrypt_{user_id}", style="danger"),
         ],
         [
-            InlineKeyboardButton("📖 راهنما", callback_data=f"exec_crypto_text_help_{user_id}"),
+            InlineKeyboardButton("📖 راهنما", callback_data=f"exec_crypto_text_help_{user_id}", style="primary"),
         ],
         [
-            InlineKeyboardButton("⚈ بازگشت", callback_data=f"back_main"),
+            InlineKeyboardButton("⚈ بازگشت", callback_data=f"back_main", style="danger"),
         ],
     ]
     return InlineKeyboardMarkup(keyboard)
+
 
 
 def get_widgets_menu_keyboard(user_id):
-    """ابزارک‌ها: ماشین‌حساب، آب‌وهوا، ویکی، گیت‌هاب، اسکن QR"""
     keyboard = [
         [
-            InlineKeyboardButton("🔢 ماشین حساب", callback_data=f"exec_calc_help_{user_id}"),
-            InlineKeyboardButton("🌤 آب و هوا", callback_data=f"exec_weather_help_{user_id}"),
+            InlineKeyboardButton("🔢 ماشین حساب", callback_data=f"exec_calc_help_{user_id}", style="primary"),
+            InlineKeyboardButton("🌤 آب و هوا", callback_data=f"exec_weather_help_{user_id}", style="success"),
         ],
         [
-            InlineKeyboardButton("📚 ویکی‌پدیا", callback_data=f"exec_wiki_help_{user_id}"),
-            InlineKeyboardButton("🐙 گیت‌هاب", callback_data=f"exec_github_help_{user_id}"),
+            InlineKeyboardButton("📚 ویکی‌پدیا", callback_data=f"exec_wiki_help_{user_id}", style="primary"),
+            InlineKeyboardButton("🐙 گیت‌هاب", callback_data=f"exec_github_help_{user_id}", style="success"),
         ],
         [
-            InlineKeyboardButton("📷 اسکن QR", callback_data=f"exec_qr_scan_{user_id}"),
-            InlineKeyboardButton("🝰 ساخت QR", callback_data=f"exec_qr_{user_id}"),
+            InlineKeyboardButton("📷 اسکن QR", callback_data=f"exec_qr_scan_{user_id}", style="primary"),
+            InlineKeyboardButton("🝰 ساخت QR", callback_data=f"exec_qr_{user_id}", style="success"),
         ],
         [
-            InlineKeyboardButton("📖 راهنما", callback_data=f"exec_widgets_help_{user_id}"),
+            InlineKeyboardButton("📖 راهنما", callback_data=f"exec_widgets_help_{user_id}", style="primary"),
         ],
         [
-            InlineKeyboardButton("⚈ بازگشت", callback_data=f"back_main"),
+            InlineKeyboardButton("⚈ بازگشت", callback_data=f"back_main", style="danger"),
         ],
     ]
     return InlineKeyboardMarkup(keyboard)
+
 
 
 def get_ai_menu_keyboard(user_id):
@@ -12245,13 +12364,20 @@ async def exec_command_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     # ========== راهنماهای بخش‌ها ==========
     HELP_TEXTS = {
-        'google_help': """📖 راهنمای گوگل و آهنگ
+        'google_help': """📖 راهنمای گوگل
 
-› 🔍 سرچ — حالت جستجوی گوگل را روشن می‌کند. بعد از روشن شدن، هر متنی بفرستید جستجو می‌شود.
-› ❌ خروج جستجو — حالت سرچ را خاموش می‌کند.
-› 🎵 آهنگ — برای پخش آهنگ از دستور `.اهنگ [نام]` استفاده کنید.
+› 🔎 سرچ روشن/خاموش — حالت جستجو
+  وقتی روشن است هر متنی که بفرستید جستجو می‌شود.
 
-مثال: `.اهنگ شادمهر`""",
+› 📥 دانلود برنامه
+  ۱) سرچ را روشن کنید
+  ۲) بنویسید: برنامه روبیکا
+  یا: دانلود برنامه اینستاگرام
+  لینک‌های مرتبط نمایش داده می‌شود.
+  اگر لینک مستقیم .apk باشد فایل ارسال می‌شود.
+
+› دستور متنی: سرچ روشن | سرچ خاموش
+› برای فقط لینک: لینک بده برنامه روبیکا""",
         'time_help': """📖 راهنمای زمان و پروفایل
 
 › 🕐 تایم روشن — ساعت را در اسم پروفایل نمایش می‌دهد.
@@ -12477,13 +12603,21 @@ OCR روی عکس (ریپلای)
 › پیام‌های حذف‌شده/ویرایش‌شده و مدیا به گروه گزارش ارسال می‌شوند.""",
         'tools_help': """📖 راهنمای ابزار
 
-› 📊 امار گپ — آمار گفتگو با کاربر (ریپلای یا پی‌وی).
-› 🝰 کد QR — ساخت QR از متن/عکس/ویدیو.\n› 📷 اسکن QR — ریپلای روی عکس/ویدیو.\n› 🔐 رمزنگاری / 🔓 رمزگشایی.\n› 🌍 ساعت جهانی.\n› همیشه آنلاین / نقطه روشن|خاموش.\n› اضافه کردن فونت [۰–۹].
-› 👑 تگ ادمین — منشن ادمین‌های گروه.
-› 📌 پین — پین کردن پیام ریپلای‌شده.
-› 🤖 سلف روشن/خاموش — فعال/غیرفعال کردن سلف‌بات.
-› 🎨 ساخت استیکر — ریپلای روی پیام کاربر + دستور `ساخت استیکر` → استیکر نقل‌قول از @QuotLyBot بدون فوروارد و بدون متن.
-› 🎙 ویدیو → ویس — ریپلای روی ویدیو + دستور `ویس` یا `صدا` → استخراج صدا و ارسال به صورت ویس.""",
+› 📊 آمار گپ — آمار پیام‌های چت فعلی
+› 🝰 کد QR — ساخت QR از متن یا ریپلای روی عکس
+  دستور: کد سلام | ریپلای + کد
+› 👑 تگ ادمین — منشن ادمین‌های گروه
+› 📌 پین — پین کردن پیام ریپلای‌شده
+› 🤖 سلف روشن/خاموش — فقط وضعیت سلف (همان منو)
+› 🎨 ساخت استیکر — از عکس ریپلای
+› 🔢 آیدی عددی — نمایش آیدی عددی
+› 🎙 ویدیو → ویس — تبدیل ویدیو به ویس
+› 🔵 ویدیو گرد — ریپلای روی ویدیو + دستور: ویدیو گرد
+  (نیاز به ffmpeg روی سرور)
+› 🧠 یادگیری — پاسخ‌های ذخیره‌شده
+› 🗑 ریست دیتابیس — پاکسازی داده یادگیری
+
+دکمه‌های روشن/خاموش فقط همان قابلیت را عوض می‌کنند.""",
         'monshi_help': """📖 راهنمای منشی هوشمند
 
 › 🤖 منشی — با دستور `منشی [پاسخ]` فعال می‌شود.
@@ -12498,6 +12632,45 @@ OCR روی عکس (ریپلای)
 › ⛔ لغو تگ — عملیات تگ را متوقف می‌کند.
 
 فقط در گروه کار می‌کند.""",
+        'widgets_help': """📖 راهنمای ابزارک‌ها
+
+🔢 ماشین حساب
+دستور: حساب 2+2*10
+یا: ماشین حساب (12+5)/3
+
+🌤 آب و هوا
+دستور: آب و هوا تهران
+یا: هوا مشهد
+
+📚 ویکی‌پدیا
+دستور: ویکی تلگرام
+
+🐙 گیت‌هاب
+دستور: گیتهاب torvalds
+یا: گیتهاب https://github.com/user/repo
+(دانلود zip ریپو)
+
+📷 اسکن QR — ریپلای روی عکس + اسکن
+🝰 ساخت QR — کد متن شما""",
+        'crypto_text_help': """📖 راهنمای متن رمزی
+
+🔐 رمزنگاری ایموجی
+ریپلای روی پیام + رمزنگاری
+یا: رمزنگاری ایموجی
+
+🔢 رمزنگاری عدد
+ریپلای + رمزنگاری عدد
+
+🔓 رمزگشایی
+ریپلای روی پیام رمزشده + رمزگشایی
+
+طرف مقابل با سلف می‌تواند رمزگشایی کند.""",
+        'btnset_help': """📖 تنظیم دکمه‌ها
+
+روی هر بخش بزنید تا رنگش عوض شود:
+🔵 آبی  🟢 سبز  🔴 قرمز
+
+روی منوی اصلی اعمال می‌شود.""",
         'fortune_help': """📖 راهنمای فال
 
 › 🌟 فال عمومی — یک فال تصادفی.
@@ -12525,13 +12698,52 @@ OCR روی عکس (ریپلای)
         'spam_help': f'spam_menu_{user_id}',
         'change_help': f'change_menu_{user_id}',
         'enemy_help': f'enemy_menu_{user_id}',
-        'filter_help': f'exec_open_filter_{user_id}',
+        'filter_help': f'filter_menu_{user_id}',
         'protection_help': f'protection_menu_{user_id}',
         'ai_help': f'ai_menu_{user_id}',
         'report_help': f'report_menu_{user_id}',
         'tools_help': f'tools_menu_{user_id}',
         'monshi_help': f'monshi_menu_{user_id}',
         'mention_help': f'mention_menu_{user_id}',
+        'widgets_help': """📖 راهنمای ابزارک‌ها
+
+🔢 ماشین حساب
+دستور: حساب 2+2*10
+یا: ماشین حساب (12+5)/3
+
+🌤 آب و هوا
+دستور: آب و هوا تهران
+یا: هوا مشهد
+
+📚 ویکی‌پدیا
+دستور: ویکی تلگرام
+
+🐙 گیت‌هاب
+دستور: گیتهاب torvalds
+یا: گیتهاب https://github.com/user/repo
+(دانلود zip ریپو)
+
+📷 اسکن QR — ریپلای روی عکس + اسکن
+🝰 ساخت QR — کد متن شما""",
+        'crypto_text_help': """📖 راهنمای متن رمزی
+
+🔐 رمزنگاری ایموجی
+ریپلای روی پیام + رمزنگاری
+یا: رمزنگاری ایموجی
+
+🔢 رمزنگاری عدد
+ریپلای + رمزنگاری عدد
+
+🔓 رمزگشایی
+ریپلای روی پیام رمزشده + رمزگشایی
+
+طرف مقابل با سلف می‌تواند رمزگشایی کند.""",
+        'btnset_help': """📖 تنظیم دکمه‌ها
+
+روی هر بخش بزنید تا رنگش عوض شود:
+🔵 آبی  🟢 سبز  🔴 قرمز
+
+روی منوی اصلی اعمال می‌شود.""",
         'fortune_help': f'fortune_menu_{user_id}',
         'crypto_help': f'crypto_menu_{user_id}',
         'bio_help': f'bio_menu_{user_id}',
@@ -13401,6 +13613,47 @@ OCR روی عکس (ریپلای)
         except Exception:
             pass
         return
+    
+    if cmd.startswith('btnstyle_'):
+        key = cmd[len('btnstyle_'):]
+        # strip trailing user id if glued wrong - cmd is btnstyle_time from exec_btnstyle_time_USER
+        # actual parse: parts already stripped; cmd might be btnstyle_time
+        if key == 'reset':
+            try:
+                db.update_selfbot_setting(user_id, 'btn_styles', '{}')
+            except Exception:
+                pass
+            try:
+                await refresh_panel_keyboard(query, user_id, "🎨 رنگ‌ها ریست شد", get_btnset_menu_keyboard)
+            except Exception:
+                pass
+            return
+        # key may include nothing extra
+        key = key.strip('_')
+        if key in get_btn_styles(user_id):
+            nxt = cycle_btn_style(user_id, key)
+            try:
+                await refresh_panel_keyboard(query, user_id, f"🎨 {_STYLE_LABEL.get(nxt, nxt)} — ذخیره شد", get_btnset_menu_keyboard)
+            except Exception:
+                pass
+        return
+    if cmd == 'btnset_help':
+        try:
+            await safe_edit_panel(
+                query,
+                "🎨 راهنمای تنظیم دکمه‌ها\n\n"
+                "روی هر بخش بزنید تا رنگش عوض شود:\n"
+                "🔵 آبی (primary)\n"
+                "🟢 سبز (success)\n"
+                "🔴 قرمز (danger)\n\n"
+                "رنگ روی دکمه‌های منوی اصلی اعمال می‌شود.\n"
+                "ریست رنگ‌ها همه را به پیش‌فرض برمی‌گرداند.",
+                reply_markup=get_btnset_menu_keyboard(user_id),
+            )
+        except Exception:
+            pass
+        return
+
     if cmd == 'always_online_on':
         db.update_selfbot_setting(user_id, 'always_online', 1)
         if user_id_str in selfbot_managers:
