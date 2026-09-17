@@ -93,6 +93,22 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 from io import BytesIO
 import urllib.parse
 
+# استایل دکمه‌ها (Bot API): فقط primary / success / danger
+_BTN_STYLES = {"primary", "success", "danger"}
+
+def Btn(text, callback_data, style=None):
+    """InlineKeyboardButton با استایل رنگی امن"""
+    kwargs = {"text": text, "callback_data": callback_data}
+    if style in _BTN_STYLES:
+        try:
+            return InlineKeyboardButton(**kwargs, style=style)
+        except TypeError:
+            # نسخه قدیمی PTB بدون پارامتر style
+            return InlineKeyboardButton(**kwargs)
+    return InlineKeyboardButton(**kwargs)
+
+
+
 flask_app = Flask(__name__)
 
 @flask_app.route('/')
@@ -100,7 +116,7 @@ def home():
     return jsonify({
         "status": "running",
         "bot": "VROOM",
-        "version": "5.1.0"
+        "version": "5.1.1"
     })
 
 @flask_app.route('/health')
@@ -961,7 +977,7 @@ SPAM_MESSAGES = [
     "کص ننت تو فروشگاه تنگستن کس داد، تنگستن کس شد و شکست",
 ]
 
-BOT_VERSION = "5.1.0"
+BOT_VERSION = "5.1.1"
 BOT_CREATOR = "VROOM"
 PANEL_HEADER_IMAGE = "panel_header.png"  # تصویر بالای پنل (تصویر جدید VROOM)
 
@@ -2938,39 +2954,65 @@ async def scan_qr_from_image_path(img_path: str):
 
 
 async def get_ai_response(text, ai_type=1, user_id=None):
-    """پاسخ چت با Kira AI (OpenAI-compatible). ai_type برای سازگاری نگه داشته شده."""
-    try:
-        headers = {
-            "Authorization": f"Bearer {KIRA_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        data = {
-            "model": KIRA_CHAT_MODEL,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "تو یک دستیار هوشمند فارسی هستی. فقط مستقیم و مفید جواب بده. "
-                        "هرگز خودت را معرفی نکن، نام مدل نگو، لینک سایت نده و امضا نگذار مگر کاربر صریحاً بخواهد. "
-                        "پاسخ کوتاه و واضح باشد."
-                    ),
-                },
-                {"role": "user", "content": text},
-            ],
-            "temperature": 0.7,
-            "max_tokens": 2048
-        }
-        response = requests.post(KIRA_CHAT_URL, headers=headers, json=data, timeout=60)
-        if response.status_code == 200:
-            result = response.json()
-            if "choices" in result and result["choices"]:
-                return result["choices"][0]["message"]["content"].strip()
-            if "error" in result:
-                logger.error(f"Kira chat error: {result.get('error')}")
-        else:
-            logger.error(f"Kira chat HTTP {response.status_code}: {response.text[:300]}")
-    except Exception as e:
-        logger.error(f"get_ai_response: {e}")
+    """پاسخ چت با Kira AI — چند مدل امتحان می‌شود؛ در خطا متن خطا برمی‌گردد با پیشوند ERR:"""
+    headers = {
+        "Authorization": f"Bearer {KIRA_API_KEY}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    system = (
+        "تو یک دستیار هوشمند فارسی هستی. فقط مستقیم و مفید جواب بده. "
+        "هرگز خودت را معرفی نکن، نام مدل نگو، لینک سایت نده و امضا نگذار مگر کاربر صریحاً بخواهد. "
+        "پاسخ کوتاه و واضح باشد."
+    )
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": text},
+    ]
+    models_try = [
+        KIRA_CHAT_MODEL,
+        "kira-3.5-flash",
+        "gpt-4o-mini",
+        "gpt-3.5-turbo",
+        "kira-flash",
+        "gemini-2.0-flash",
+    ]
+    last_err = None
+    for model in models_try:
+        try:
+            data = {
+                "model": model,
+                "messages": messages,
+                "temperature": 0.7,
+                "max_tokens": 2048,
+            }
+            response = requests.post(KIRA_CHAT_URL, headers=headers, json=data, timeout=60)
+            if response.status_code == 200:
+                result = response.json()
+                if "choices" in result and result["choices"]:
+                    msg = result["choices"][0].get("message") or {}
+                    content_out = (msg.get("content") or "").strip()
+                    if content_out:
+                        return content_out
+                err = result.get("error") or result
+                last_err = str(err)[:200]
+                logger.error(f"Kira {model} body err: {last_err}")
+                continue
+            # parse error
+            try:
+                ej = response.json()
+                last_err = str(ej.get("error") or ej)[:250]
+            except Exception:
+                last_err = response.text[:250]
+            logger.error(f"Kira {model} HTTP {response.status_code}: {last_err}")
+            # 402 موجودی = بقیه مدل‌ها هم معمولاً همان
+            if response.status_code in (401, 402, 403):
+                break
+        except Exception as e:
+            last_err = str(e)[:200]
+            logger.error(f"get_ai_response {model}: {e}")
+    if last_err:
+        return f"ERR:{last_err}"
     return None
 
 
@@ -8279,9 +8321,15 @@ class SelfBotManager:
                 try:
                     await self.client(SetTypingRequest(event.chat_id, types.SendMessageTypingAction()))
                     response = await get_ai_response(event.message.text, ai_type, self.user_id)
-                    if response:
+                    if response and not str(response).startswith("ERR:"):
                         text, entities = await apply_text_style(response, settings.get('text_style'))
-                        await event.reply(text, formatting_entities=entities)
+                        await event.reply(text, formatting_entities=entities if entities else None)
+                    elif response and str(response).startswith("ERR:"):
+                        err = str(response)[4:]
+                        if "402" in err or "payment" in err.lower() or "under_maintenance" in err.lower() or "balance" in err.lower() or "current_vnd" in err.lower():
+                            await event.reply("❌ Kira AI: موجودی حساب یا مدل در دسترس نیست.\nتوکن را در kiraai.vn شارژ کنید یا مدل فعال انتخاب کنید.")
+                        else:
+                            await event.reply(f"❌ خطا از Kira:\n{err[:500]}")
                     else:
                         await event.reply("❌ خطا در ارتباط با هوش مصنوعی. لطفاً بعداً تلاش کنید.")
                 except Exception as e:
@@ -9717,7 +9765,7 @@ def get_main_panel_keyboard(user_id):
             InlineKeyboardButton("👹 دشمنان", callback_data=f"enemy_menu_{user_id}", style="danger")
         ],
         [
-            InlineKeyboardButton("🚫 فیلتر کلمات", callback_data=f"exec_open_filter_{user_id}", style="primary"),
+            InlineKeyboardButton("🚫 فیلتر کلمات", callback_data=f"filter_menu_{user_id}", style="danger"),
             InlineKeyboardButton("🛡 حفاظت اسپم", callback_data=f"protection_menu_{user_id}", style="primary"),
             InlineKeyboardButton("🤖 هوش مصنوعی", callback_data=f"ai_menu_{user_id}", style="primary")
         ],
@@ -9732,9 +9780,9 @@ def get_main_panel_keyboard(user_id):
             InlineKeyboardButton("🔮 فال", callback_data=f"fortune_menu_{user_id}", style="primary")
         ],
         [
-            InlineKeyboardButton("🔐 متن رمزی", callback_data=f"secret_menu_{user_id}"),
-            InlineKeyboardButton("🧩 ابزارک‌ها", callback_data=f"widgets_menu_{user_id}"),
-            InlineKeyboardButton("📦 بکاپ‌گیری", callback_data=f"backup_menu_{user_id}"),
+            InlineKeyboardButton("🔐 متن رمزی", callback_data=f"secret_menu_{user_id}", style="success"),
+            InlineKeyboardButton("🧩 ابزارک‌ها", callback_data=f"widgets_menu_{user_id}", style="primary"),
+            InlineKeyboardButton("📦 بکاپ‌گیری", callback_data=f"backup_menu_{user_id}", style="success"),
         ],
         [
             InlineKeyboardButton("✖️ بستن پنل", callback_data=f"close_panel_{user_id}", style="danger")
@@ -10618,22 +10666,30 @@ def get_filter_menu_keyboard(user_id):
     is_enabled = db.get_filter_enabled(user_id)
     keyboard = [
         [
-            InlineKeyboardButton("🚫 .فیلتر [کلمه]", callback_data=f"exec_filter_word_{user_id}", style="danger"),
-            InlineKeyboardButton(f"✅ فیلتر روشن {'✓' if is_enabled else ''}", callback_data=f"exec_filter_on_{user_id}", style="success" if is_enabled else "secondary")
+            InlineKeyboardButton(
+                f"{'✓ ' if is_enabled else ''}✅ فیلتر روشن",
+                callback_data=f"exec_filter_on_{user_id}",
+                style="success" if is_enabled else "primary",
+            ),
+            InlineKeyboardButton(
+                f"{'✓ ' if not is_enabled else ''}❌ فیلتر خاموش",
+                callback_data=f"exec_filter_off_{user_id}",
+                style="danger" if not is_enabled else "primary",
+            ),
         ],
         [
-            InlineKeyboardButton(f"❌ فیلتر خاموش {'✓' if not is_enabled else ''}", callback_data=f"exec_filter_off_{user_id}", style="danger" if not is_enabled else "secondary"),
-            InlineKeyboardButton("📜 لیست / مدیریت کلمات", callback_data=f"exec_filter_list_{user_id}", style="primary")
-        ],
-        
-        [
-            InlineKeyboardButton("📖 راهنما", callback_data=f"exec_filter_help_{user_id}", style="primary")
+            InlineKeyboardButton("📜 لیست کلمات", callback_data=f"exec_filter_list_{user_id}", style="primary"),
+            InlineKeyboardButton("➕ افزودن (راهنما)", callback_data=f"exec_filter_word_{user_id}", style="success"),
         ],
         [
-            InlineKeyboardButton("⚈ بازگشت", callback_data=f"back_main", style="danger")
-        ]
+            InlineKeyboardButton("📖 راهنما", callback_data=f"exec_filter_help_{user_id}", style="primary"),
+        ],
+        [
+            InlineKeyboardButton("⚈ بازگشت", callback_data=f"back_main", style="danger"),
+        ],
     ]
     return InlineKeyboardMarkup(keyboard)
+
 
 def build_filter_words_keyboard(user_id, filters):
     keyboard = []
@@ -10734,34 +10790,50 @@ def get_widgets_menu_keyboard(user_id):
 def get_ai_menu_keyboard(user_id):
     settings = db.get_selfbot_settings(user_id)
     ai = settings.get('ai_status') or {}
-    # فقط Kira: از ai_1_pm / ai_1_group استفاده می‌کنیم
     pm_on = bool(ai.get('ai_1_pm'))
     group_on = bool(ai.get('ai_1_group'))
     keyboard = [
         [
-            InlineKeyboardButton(f"🤖 پاسخ خودکار پیوی {'✓' if pm_on else ''}", callback_data=f"exec_ai_pm_1_{user_id}", style="success" if not pm_on else "primary"),
-            InlineKeyboardButton(f"🤖 پاسخ خودکار گروه {'✓' if group_on else ''}", callback_data=f"exec_ai_group_1_{user_id}", style="success" if not group_on else "primary"),
+            InlineKeyboardButton(
+                f"{'✓ ' if pm_on else ''}🤖 پیوی روشن",
+                callback_data=f"exec_ai_pm_1_{user_id}",
+                style="success" if pm_on else "primary",
+            ),
+            InlineKeyboardButton(
+                f"{'✓ ' if not pm_on else ''}🤖 پیوی خاموش",
+                callback_data=f"exec_ai_pm_off_{user_id}",
+                style="danger" if not pm_on else "primary",
+            ),
         ],
         [
-            InlineKeyboardButton("⚫ خاموش پیوی", callback_data=f"exec_ai_pm_off_{user_id}", style="danger"),
-            InlineKeyboardButton("⚫ خاموش گروه", callback_data=f"exec_ai_group_off_{user_id}", style="danger"),
+            InlineKeyboardButton(
+                f"{'✓ ' if group_on else ''}🤖 گروه روشن",
+                callback_data=f"exec_ai_group_1_{user_id}",
+                style="success" if group_on else "primary",
+            ),
+            InlineKeyboardButton(
+                f"{'✓ ' if not group_on else ''}🤖 گروه خاموش",
+                callback_data=f"exec_ai_group_off_{user_id}",
+                style="danger" if not group_on else "primary",
+            ),
         ],
         [
             InlineKeyboardButton("🖼 ساخت عکس", callback_data=f"exec_ai_image_{user_id}", style="primary"),
-            InlineKeyboardButton("🔊 خط به صدا", callback_data=f"exec_ai_tts_{user_id}"),
+            InlineKeyboardButton("🔊 خط به صدا", callback_data=f"exec_ai_tts_{user_id}", style="primary"),
         ],
         [
-            InlineKeyboardButton("🎙 صدا به خط", callback_data=f"exec_ai_stt_{user_id}"),
-            InlineKeyboardButton("💬 چت با Kira", callback_data=f"exec_ai_chat_{user_id}", style="primary"),
+            InlineKeyboardButton("🎙 صدا به خط", callback_data=f"exec_ai_stt_{user_id}", style="primary"),
+            InlineKeyboardButton("💬 چت با Kira", callback_data=f"exec_ai_chat_{user_id}", style="success"),
         ],
         [
-            InlineKeyboardButton("📖 راهنما", callback_data=f"exec_ai_help_{user_id}", style="primary")
+            InlineKeyboardButton("📖 راهنما (دستورات)", callback_data=f"exec_ai_help_{user_id}", style="primary"),
         ],
         [
-            InlineKeyboardButton("⚈ بازگشت", callback_data=f"back_main", style="danger")
-        ]
+            InlineKeyboardButton("⚈ بازگشت", callback_data=f"back_main", style="danger"),
+        ],
     ]
     return InlineKeyboardMarkup(keyboard)
+
 
 def get_report_menu_keyboard(user_id):
     keyboard = [
@@ -12219,12 +12291,17 @@ async def exec_command_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 نکته: در کانال/گروه مرتبط دستور `کامنت متن شما` را بزنید.""",
         'general_help': """📖 راهنمای عمومی
 
-› 📊 وضعیت — وضعیت فعلی سلف‌بات و تنظیمات.
-› ℹ️ درباره — نسخه و سازنده.
-› ⏱️ پینگ — تأخیر پاسخ ربات.
-› 👤 پنل کاربر — روی پیام هر کاربر ریپلای کنید و بنویسید: پنل کاربر
-  عکس پروفایل + اطلاعات + دکمه‌های قفل/دشمن برای همان کاربر می‌آید.
-  (در گروه و پیوی کار می‌کند)""",
+📊 وضعیت — وضعیت سلف و تنظیمات
+ℹ️ درباره — نسخه ربات
+⏱️ پینگ — تأخیر اتصال
+
+🟢 همیشه آنلاین — اکانت همیشه آنلاین بماند
+⚫ آفلاین عادی — حالت عادی تلگرام
+
+• نقطه دستور روشن — فقط با نقطه مثل .تایم روشن
+• نقطه خاموش — دستور بدون نقطه هم کار می‌کند
+
+دکمه‌های روشن/خاموش فقط همان قابلیت را فعال/غیرفعال می‌کنند و به منوی دیگر نمی‌روند.""",
         'action_help': """📖 راهنمای اکشن
 
 دستورات متنی (کپی کنید):
@@ -12352,20 +12429,16 @@ OCR روی عکس (ریپلای)
 • ساعت رنگ سبز""",
         'filter_help': """📖 راهنمای فیلتر کلمات
 
-› افزودن کلمه:
-  • `.فیلتر تبلیغ`
-  • `فیلتر تبلیغ`
+دکمه «فیلتر روشن/خاموش» فقط وضعیت فیلتر را عوض می‌کند.
 
-› فعال‌سازی:
-  • `فیلتر روشن` — هر پیام حاوی کلمهٔ فعال حذف می‌شود
-  • `فیلتر خاموش`
+افزودن کلمه (در سلف):
+.فیلتر تبلیغ
+یا: فیلتر اسپم
 
-› مدیریت:
-  • `فیلتر لیست` — نمایش کلمات
-  • `فیلتر حذف [کلمه]`
+لیست: فیلتر لیست
+حذف: فیلتر حذف [کلمه]
 
-› از پنل هم می‌توانید هر کلمه را تکی روشن/خاموش یا حذف کنید.
-› روی کپشن عکس/ویدیو هم اعمال می‌شود (در صورت داشتن دسترسی حذف).""",
+وقتی فیلتر روشن باشد، پیام‌های دارای آن کلمات حذف می‌شوند.""",
         'protection_help': """📖 راهنمای حفاظت اسپم
 
 › 🛡️ اسپم روشن/خاموش — محافظت در برابر اسپم دیگران.
@@ -13333,7 +13406,7 @@ OCR روی عکس (ریپلای)
         if user_id_str in selfbot_managers:
             selfbot_managers[user_id_str].always_online = True
         try:
-            await refresh_panel_keyboard(query, user_id, "🟢 همیشه آنلاین", get_tools_menu_keyboard)
+            await refresh_panel_keyboard(query, user_id, "📌 عمومی", get_general_menu_keyboard)
         except Exception:
             pass
         return
@@ -13342,21 +13415,21 @@ OCR روی عکس (ریپلای)
         if user_id_str in selfbot_managers:
             selfbot_managers[user_id_str].always_online = False
         try:
-            await refresh_panel_keyboard(query, user_id, "⚫ آفلاین عادی", get_tools_menu_keyboard)
+            await refresh_panel_keyboard(query, user_id, "📌 عمومی", get_general_menu_keyboard)
         except Exception:
             pass
         return
     if cmd == 'dot_on':
         db.update_selfbot_setting(user_id, 'command_dot_required', 1)
         try:
-            await refresh_panel_keyboard(query, user_id, "• نقطه روشن", get_tools_menu_keyboard)
+            await refresh_panel_keyboard(query, user_id, "📌 عمومی", get_general_menu_keyboard)
         except Exception:
             pass
         return
     if cmd == 'dot_off':
         db.update_selfbot_setting(user_id, 'command_dot_required', 0)
         try:
-            await refresh_panel_keyboard(query, user_id, "• نقطه خاموش", get_tools_menu_keyboard)
+            await refresh_panel_keyboard(query, user_id, "📌 عمومی", get_general_menu_keyboard)
         except Exception:
             pass
         return
