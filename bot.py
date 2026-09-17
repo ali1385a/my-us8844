@@ -116,7 +116,7 @@ def home():
     return jsonify({
         "status": "running",
         "bot": "VROOM",
-        "version": "5.2.0"
+        "version": "5.2.1"
     })
 
 @flask_app.route('/health')
@@ -343,15 +343,19 @@ async def render_crypto_chart_image(title: str, lines: list) -> str:
 
 
 PERSIAN_COIN_MAP = {
-    "بیتکوین": "BTC", "بیت کوین": "BTC", "بیت": "BTC",
-    "اتریوم": "ETH", "اتر": "ETH", "اتریم": "ETH",
-    "تتر": "USDT", "دلار": "USDT",
+    "بیتکوین": "BTC", "بیت کوین": "BTC", "بیت": "BTC", "btc": "BTC",
+    "اتریوم": "ETH", "اتر": "ETH", "اتریم": "ETH", "eth": "ETH",
+    "تتر": "USDT", "دلار": "USD_IRT", "usd": "USD_IRT",
     "سولانا": "SOL", "سول": "SOL",
     "تون": "TON", "تون کوین": "TON",
     "ترون": "TRX", "ریپل": "XRP", "بایننس": "BNB", "بی ان بی": "BNB",
     "دوج": "DOGE", "دوجکوین": "DOGE", "شیبا": "SHIB", "نات": "NOT",
     "کاردانو": "ADA", "آدا": "ADA", "پپه": "PEPE", "آواکس": "AVAX",
     "لینک": "LINK", "چین لینک": "LINK",
+    "طلا": "GOLD", "انس": "GOLD", "انس طلا": "GOLD", "gold": "GOLD",
+    "یوان": "CNY", "یوان چین": "CNY", "چین": "CNY", "cny": "CNY",
+    "یورو": "EUR", "پوند": "GBP", "درهم": "AED", "لیر": "TRY",
+    "روبل": "RUB", "ین": "JPY", "وون": "KRW",
 }
 
 async def compose_cyberpunk_coin_card(symbol: str, usd_price: float, irt_price: float, change_pct: float = None) -> str:
@@ -977,7 +981,7 @@ SPAM_MESSAGES = [
     "کص ننت تو فروشگاه تنگستن کس داد، تنگستن کس شد و شکست",
 ]
 
-BOT_VERSION = "5.2.0"
+BOT_VERSION = "5.2.1"
 BOT_CREATOR = "VROOM"
 PANEL_HEADER_IMAGE = "panel_header.png"  # تصویر بالای پنل (تصویر جدید VROOM)
 
@@ -3066,7 +3070,9 @@ async def kira_generate_image(prompt: str) -> str:
 
 
 async def kira_text_to_speech(text: str, voice: str = "alloy") -> str:
-    """متن به ویس — مسیر فایل mp3 یا None"""
+    """متن به ویس — Kira سپس gTTS"""
+    import tempfile, time as _t
+    out = os.path.join(tempfile.gettempdir(), f"tts_{int(_t.time()*1000)}.mp3")
     try:
         headers = {
             "Authorization": f"Bearer {KIRA_API_KEY}",
@@ -3078,34 +3084,32 @@ async def kira_text_to_speech(text: str, voice: str = "alloy") -> str:
             "voice": voice
         }
         response = requests.post(KIRA_TTS_URL, headers=headers, json=data, timeout=90)
-        if response.status_code != 200:
-            logger.error(f"Kira TTS HTTP {response.status_code}: {response.text[:300]}")
-            return None
-        import tempfile, time as _t
-        out = os.path.join(tempfile.gettempdir(), f"kira_tts_{int(_t.time()*1000)}.mp3")
-        with open(out, "wb") as f:
-            f.write(response.content)
-        return out
+        if response.status_code == 200 and response.content and len(response.content) > 100:
+            with open(out, "wb") as f:
+                f.write(response.content)
+            return out
+        logger.error(f"Kira TTS HTTP {response.status_code}: {response.text[:200]}")
     except Exception as e:
         logger.error(f"kira_text_to_speech: {e}")
-        return None
-
-
-async def kira_speech_to_text(audio_path: str) -> str:
-    """ویس به متن"""
+    # fallback gTTS
     try:
-        headers = {"Authorization": f"Bearer {KIRA_API_KEY}"}
-        with open(audio_path, "rb") as af:
-            files = {"file": (os.path.basename(audio_path), af, "audio/mpeg")}
-            data = {"model": KIRA_STT_MODEL}
-            response = requests.post(KIRA_STT_URL, headers=headers, files=files, data=data, timeout=90)
-        if response.status_code == 200:
-            result = response.json()
-            return (result.get("text") or "").strip()
-        logger.error(f"Kira STT HTTP {response.status_code}: {response.text[:300]}")
+        from gtts import gTTS
+        tts = gTTS(text=text[:500], lang="fa")
+        tts.save(out)
+        if os.path.exists(out) and os.path.getsize(out) > 50:
+            return out
     except Exception as e:
-        logger.error(f"kira_speech_to_text: {e}")
+        logger.error(f"gTTS fallback: {e}")
+    try:
+        from gtts import gTTS
+        tts = gTTS(text=text[:500], lang="en")
+        tts.save(out)
+        if os.path.exists(out):
+            return out
+    except Exception as e:
+        logger.error(f"gTTS en: {e}")
     return None
+
 
 
 COMMAND_ROOTS = {
@@ -3116,7 +3120,7 @@ COMMAND_ROOTS = {
     'عشق', 'سنتت', 'هک', 'وضعیت', '.پنل', 'پنل', '/panel', '.اهنگ', 'سلف', 'پین', 'تگ',
     'امار', '.کد', 'تقویم', 'فونت', 'انگلیسی', 'عربی', 'عبری', 'روسی', 'ترکی', 'اتوسین',
     'لغو', 'منشی', 'افزودن', 'بولینگ', 'تاس', 'سه', 'شانس', 'نشست\u200cهای', 'قیمت', 'نرخ',
-    'استیکر', 'ساخت', 'اسکرین\u200cشات', 'اسکرین‌شات', 'تشخیص', 'ساعت', 'بیو', 'ترجمه', 'دلار',
+    'استیکر', 'ساخت', 'اسکرین\u200cشات', 'اسکرین‌شات', 'تشخیص', 'ساعت', 'بیو', 'ترجمه', 'دلار', 'لیر', 'درهم', 'پوند', 'یورو', 'یوان', 'طلا',
     'یادگیری', 'بکاپ', 'بکاب', 'اتمام', 'فال', 'اطلاعات', '.بن', '.انبن', 'بن', 'انبن', 'دارت', 'بسکتبال', 'فوتبال', '.بن', '.انبن', 'بن', 'انبن',
     'یوزرنیم',
     'یوزنیم', 'ایدی', 'آیدی', 'آیدی\u200cعددی', 'ایدی\u200cعددی', 'username', 'id',
@@ -4711,7 +4715,7 @@ class SelfBotManager:
         raw_full = (event.raw_text or event.text or '').strip()
         raw_low = raw_full.lower()
         # فقط «دلار» → قیمت دقیق تتر/دلار از نوبیتکس (نه لیست کامل)
-        if cmd in ('دلار',) and not args:
+        if cmd in ('دلار', 'لیر', 'درهم', 'پوند', 'یورو', 'یوان', 'طلا',) and not args:
             try:
                 await event.edit("💵 در حال دریافت قیمت دلار...")
                 usdt_irt = None
@@ -4750,6 +4754,111 @@ class SelfBotManager:
             except Exception as e:
                 await event.edit(f"❌ خطا: {e}")
             return
+
+        # طلا / یوان / ارزهای فیات رایج
+        if cmd in ('طلا', 'انس', 'یوان', 'یورو', 'پوند', 'درهم', 'لیر', 'روبل') or raw_low in ('یوان چین', 'انس طلا', 'طلای جهانی'):
+            name = cmd
+            if 'یوان' in raw_low or cmd == 'یوان':
+                name = 'یوان'
+            try:
+                await event.edit(f"💱 در حال دریافت قیمت {name}...")
+                # طلا از tgju یا نوبیتکس-like
+                if name in ('طلا', 'انس') or 'طلا' in raw_low:
+                    price_txt = None
+                    try:
+                        r = requests.get("https://api.tgju.org/v1/market/indicator/summary-table", timeout=12)
+                        # fallback simple
+                    except Exception:
+                        pass
+                    try:
+                        # نرخ انس دلاری + تبدیل تقریبی
+                        r = requests.get("https://api.exchangerate-api.com/v4/latest/USD", timeout=10)
+                        usd_rates = r.json().get("rates") or {}
+                        # طلا: از metals-api آزاد نیست — از tgju scrape ساده
+                        r2 = requests.get("https://call3.tgju.org/ajax.json", timeout=12, headers={"User-Agent": "Mozilla/5.0"})
+                        if r2.status_code == 200:
+                            j = r2.json()
+                            # کلیدهای رایج
+                            ons = None
+                            for k in ("ons", "sekee", "geram18", "price_dollar_rl"):
+                                if k in (j.get("current") or {}):
+                                    pass
+                            cur = j.get("current") or j
+                            # انس جهانی
+                            for key in list(cur.keys()) if isinstance(cur, dict) else []:
+                                if "ons" in str(key).lower() or key in ("ons", "ons_buy"):
+                                    try:
+                                        ons = str(cur[key].get("p") if isinstance(cur[key], dict) else cur[key])
+                                    except Exception:
+                                        ons = str(cur[key])
+                                    break
+                            # اگر پیدا نشد
+                            if not ons and isinstance(cur, dict):
+                                item = cur.get("ons") or cur.get("price_ons")
+                                if isinstance(item, dict):
+                                    ons = item.get("p") or item.get("price")
+                                elif item:
+                                    ons = str(item)
+                            # مثقال / گرم از tgju
+                            geram = None
+                            for key in ("geram18", "gold_geram18", "geram18_buy"):
+                                if key in cur:
+                                    g = cur[key]
+                                    geram = g.get("p") if isinstance(g, dict) else g
+                                    break
+                            lines = [f"🥇 <b>قیمت طلا</b>\n"]
+                            if ons:
+                                lines.append(f"▫️ انس جهانی: <code>{ons}</code>")
+                            if geram:
+                                lines.append(f"▫️ گرم ۱۸ عیار: <code>{geram}</code> تومان")
+                            if len(lines) == 1:
+                                # fallback exchangerate only message
+                                lines.append("▫️ منبع tgju در دسترس نبود — بعداً تلاش کنید")
+                            await event.edit("\n".join(lines), parse_mode="html")
+                        else:
+                            await event.edit("❌ دریافت قیمت طلا ناموفق")
+                    except Exception as e:
+                        await event.edit(f"❌ طلا: {e}")
+                    return
+                # فیات: یوان و ...
+                code = {"یوان": "CNY", "یورو": "EUR", "پوند": "GBP", "درهم": "AED", "لیر": "TRY", "روبل": "RUB"}.get(name, "CNY")
+                r = requests.get("https://api.exchangerate-api.com/v4/latest/USD", timeout=12)
+                rates = (r.json() or {}).get("rates") or {}
+                # قیمت دلار به تومان از نوبیتکس
+                usdt_irt = 0
+                try:
+                    nr = requests.get("https://api.nobitex.ir/v2/orderbook/USDTIRT", timeout=10)
+                    nj = nr.json()
+                    if nj.get("lastTradePrice"):
+                        usdt_irt = float(nj["lastTradePrice"])
+                    elif nj.get("asks"):
+                        usdt_irt = float(nj["asks"][0][0])
+                except Exception:
+                    pass
+                if not usdt_irt:
+                    try:
+                        prices = await fetch_crypto_prices()
+                        usdt_irt = float((prices or {}).get("USDT/IRT") or 0)
+                    except Exception:
+                        pass
+                per_usd = float(rates.get(code) or 0)
+                # 1 USD = per_usd CNY → 1 CNY = usdt_irt / per_usd
+                if per_usd > 0 and usdt_irt > 0:
+                    irt = usdt_irt / per_usd
+                    await event.edit(
+                        f"💱 <b>قیمت {name}</b>\n\n"
+                        f"▫️ هر ۱ {code}: <code>{_fmt_price(irt)}</code> تومان\n"
+                        f"▫️ نرخ جهانی: ۱ USD = {per_usd} {code}\n"
+                        f"▫️ دلار/تتر: <code>{_fmt_price(usdt_irt)}</code> تومان",
+                        parse_mode="html",
+                    )
+                else:
+                    await event.edit("❌ نرخ در دسترس نیست")
+            except Exception as e:
+                await event.edit(f"❌ {e}")
+            return
+
+
         is_rate_cmd = (cmd == 'نرخ') or (cmd == 'نرخ' and args and args[0] == 'ارز') or raw_low in ('نرخ ارز', 'قیمت ارز', 'ارزها', 'کریپتو', 'بازار')
         symbol_try = PERSIAN_COIN_MAP.get(raw_low) or PERSIAN_COIN_MAP.get(cmd)
         if not symbol_try and cmd.upper() in ('BTC','ETH','TON','SOL','BNB','XRP','DOGE','NOT','PEPE','ADA','LINK','AVAX','USDT','TRX','SHIB'):
@@ -6747,8 +6856,61 @@ class SelfBotManager:
             return
 
 
+
+        # دانلود برنامه بدون نیاز به حالت سرچ
+        if cmd in ('برنامه', 'اپ', 'دانلود') and args:
+            qname = ' '.join(args).replace('برنامه', '').strip()
+            if cmd == 'دانلود' and args and args[0] == 'برنامه':
+                qname = ' '.join(args[1:]).strip()
+            if not qname:
+                await event.edit("❌ مثال: برنامه روبیکا")
+                return
+            await event.edit(f"📥 جستجوی برنامه: {qname}...")
+            try:
+                # جستجوی گوگل برای apk
+                params = {
+                    'key': GOOGLE_SEARCH_API_KEY,
+                    'cx': GOOGLE_CSE_ID,
+                    'q': f"{qname} apk download apkpure OR apkcombo",
+                    'num': 8,
+                    'safe': 'off'
+                }
+                response = requests.get(GOOGLE_SEARCH_URL, params=params, timeout=15)
+                items = (response.json() or {}).get('items') or []
+                sent = False
+                for it in items:
+                    link = it.get('link') or ''
+                    if link.lower().endswith('.apk'):
+                        rr = requests.get(link, timeout=90, headers={"User-Agent": "Mozilla/5.0"}, allow_redirects=True)
+                        if rr.status_code == 200 and len(rr.content) > 50000:
+                            import tempfile
+                            apk_path = os.path.join(tempfile.gettempdir(), f"{qname[:20]}.apk")
+                            with open(apk_path, "wb") as af:
+                                af.write(rr.content)
+                            await self.client.send_file(chat_id, apk_path, caption=f"📥 {qname}\\n{link}", reply_to=event.message.id)
+                            try:
+                                os.remove(apk_path)
+                            except Exception:
+                                pass
+                            sent = True
+                            try:
+                                await event.delete()
+                            except Exception:
+                                pass
+                            break
+                if not sent:
+                    msg = f"🔍 نتایج دانلود «{qname}»:\\n\\n"
+                    for i, it in enumerate(items[:5], 1):
+                        msg += f"{i}. {it.get('title')}\\n🔗 {it.get('link')}\\n\\n"
+                    msg += "💡 لینک مستقیم apk پیدا نشد — از یکی از لینک‌ها دانلود کنید."
+                    await event.edit(msg[:4000])
+            except Exception as e:
+                await event.edit(f"❌ {e}")
+            return
+
+
         # ========== خط به صدا / صدا به خط (Kira TTS/STT) ==========
-        if command_text.startswith('خط به صدا') or (cmd == 'خط' and args and args[0] == 'به' and len(args) > 1 and args[1] == 'صدا'):
+        if command_text.startswith('خط به صدا') or command_text.startswith('خط به ویس') or command_text.startswith('متن به ویس') or command_text.startswith('متن به صدا') or (cmd == 'خط' and args and args[0] == 'به') or (cmd == 'متن' and args and args[0] == 'به'):
             text_src = command_text
             for p in ('خط به صدا',):
                 if text_src.startswith(p):
@@ -6776,7 +6938,7 @@ class SelfBotManager:
                 await event.edit("❌ ساخت صدا ناموفق بود (API)")
             return
 
-        if command_text.startswith('صدا به خط') or (cmd == 'صدا' and args and args[0] == 'به' and len(args) > 1 and args[1] == 'خط'):
+        if command_text.startswith('صدا به خط') or command_text.startswith('ویس به متن') or command_text.startswith('ویس به خط') or (cmd == 'صدا' and args and args[0] == 'به') or (cmd == 'ویس' and args and args[0] == 'به'):
             if not event.is_reply:
                 await event.edit("❌ روی یک ویس/صدا ریپلای کنید و بنویسید: صدا به خط")
                 return
@@ -8944,7 +9106,7 @@ class SelfBotManager:
                 name = search_q
                 for p in ('برنامه', 'اپلیکیشن', 'اپ', 'نرم افزار', 'نرم‌افزار', 'دانلود'):
                     name = name.replace(p, '').strip()
-                search_q = f"{name} site:play.google.com OR site:cafebazaar.ir OR apk download"
+                search_q = f"{name} apk download (site:apkpure.com OR site:apkcombo.com OR site:cafebazaar.ir OR site:play.google.com)"
             elif is_music:
                 search_q = f"{search_q} download mp3"
             elif is_film:
@@ -9760,6 +9922,22 @@ async def refresh_panel_keyboard(query, user_id, menu_text, keyboard_func):
             pass
 
 
+
+def _safe_style(st):
+    if st in ("primary", "success", "danger"):
+        return st
+    return None
+
+def IKBtn(text, callback_data, style=None):
+    st = _safe_style(style)
+    try:
+        if st:
+            return InlineKeyboardButton(text, callback_data=callback_data, style=st)
+    except TypeError:
+        pass
+    return InlineKeyboardButton(text, callback_data=callback_data)
+
+
 def get_btn_styles(user_id):
     """دیکشنری استایل دکمه‌های منوی اصلی برای کاربر"""
     try:
@@ -9786,7 +9964,7 @@ def get_btn_styles(user_id):
         "btnset": "primary",
     }
     for k, v in defaults.items():
-        if k not in styles or styles[k] not in ("primary", "success", "danger"):
+        if k not in styles or styles[k] not in ("primary", "success", "danger", "none", "off"):
             styles[k] = v
     return styles
 
@@ -10829,7 +11007,8 @@ def get_protection_menu_keyboard(user_id):
 
 
 
-def get_btnset_menu_keyboard(user_id):
+def get_btnset_menu_keyboard(user_id, page=0):
+    """هر ردیف: نام بخش | آبی | سبز | قرمز | بی‌رنگ — صفحه‌بندی ۴ ردیف"""
     s = get_btn_styles(user_id)
     labels = [
         ("time", "⏰ زمان"), ("animation", "✨ انیمیشن"), ("user", "👤 کاربران"),
@@ -10844,18 +11023,35 @@ def get_btnset_menu_keyboard(user_id):
         ("secret", "🔐 رمز"), ("widgets", "🧩 ابزارک"), ("backup", "📦 بکاپ"),
         ("btnset", "🎨 تنظیم"),
     ]
+    per_page = 4
+    total_pages = max(1, (len(labels) + per_page - 1) // per_page)
+    page = max(0, min(int(page or 0), total_pages - 1))
+    chunk = labels[page * per_page:(page + 1) * per_page]
     keyboard = []
-    row = []
-    for key, title in labels:
-        st = s.get(key, "primary")
-        mark = {"primary": "🔵", "success": "🟢", "danger": "🔴"}.get(st, "🔵")
-        row.append(InlineKeyboardButton(f"{mark} {title}", callback_data=f"exec_btnstyle_{key}_{user_id}", style=st))
-        if len(row) == 2:
-            keyboard.append(row)
-            row = []
-    if row:
-        keyboard.append(row)
-    keyboard.append([InlineKeyboardButton("♻️ ریست رنگ‌ها", callback_data=f"exec_btnstyle_reset_{user_id}", style="danger")])
+    for key, title in chunk:
+        cur = s.get(key, "primary")
+        # 5 دکمه: نام | آبی | سبز | قرمز | بی‌رنگ
+        def mark(style_name, label):
+            on = (cur == style_name) or (style_name is None and cur in ("none", "off", ""))
+            prefix = "✓" if on else " "
+            st = style_name if style_name in ("primary", "success", "danger") else "primary"
+            return InlineKeyboardButton(f"{prefix}{label}", callback_data=f"exec_btnset_{key}_{style_name or 'none'}_{user_id}", style=st)
+        keyboard.append([
+            InlineKeyboardButton(title[:12], callback_data=f"exec_btnset_noop_{user_id}", style="primary"),
+            mark("primary", "🔵"),
+            mark("success", "🟢"),
+            mark("danger", "🔴"),
+            mark(None, "⬜"),
+        ])
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀️ قبل", callback_data=f"exec_btnsetpage_{page-1}_{user_id}", style="primary"))
+    nav.append(InlineKeyboardButton(f"{page+1}/{total_pages}", callback_data=f"exec_btnset_noop_{user_id}", style="primary"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton("بعد ▶️", callback_data=f"exec_btnsetpage_{page+1}_{user_id}", style="primary"))
+    if nav:
+        keyboard.append(nav)
+    keyboard.append([InlineKeyboardButton("♻️ ریست همه", callback_data=f"exec_btnstyle_reset_{user_id}", style="danger")])
     keyboard.append([InlineKeyboardButton("📖 راهنما", callback_data=f"exec_btnset_help_{user_id}", style="primary")])
     keyboard.append([InlineKeyboardButton("⚈ بازگشت", callback_data=f"back_main", style="danger")])
     return InlineKeyboardMarkup(keyboard)
@@ -11479,6 +11675,7 @@ async def _button_callback_impl(update: Update, context: ContextTypes.DEFAULT_TY
             "enemy": ("👹 دشمنان", get_enemy_menu_keyboard),
             "filter": ("🚫 فیلتر کلمات", get_filter_menu_keyboard),
             "secret": ("🔐 متن رمزی", get_crypto_text_menu_keyboard),
+            "btnset": ("🎨 تنظیم دکمه‌ها", get_btnset_menu_keyboard),
             "widgets": ("🧩 ابزارک‌ها", get_widgets_menu_keyboard),
             "pclock": ("🕰 ساعت در پروفایل", get_profile_clock_menu_keyboard),
             "protection": ("🛡 حفاظت اسپم", get_protection_menu_keyboard),
@@ -12705,53 +12902,39 @@ OCR روی عکس (ریپلای)
         'tools_help': f'tools_menu_{user_id}',
         'monshi_help': f'monshi_menu_{user_id}',
         'mention_help': f'mention_menu_{user_id}',
-        'widgets_help': """📖 راهنمای ابزارک‌ها
-
-🔢 ماشین حساب
-دستور: حساب 2+2*10
-یا: ماشین حساب (12+5)/3
-
-🌤 آب و هوا
-دستور: آب و هوا تهران
-یا: هوا مشهد
-
-📚 ویکی‌پدیا
-دستور: ویکی تلگرام
-
-🐙 گیت‌هاب
-دستور: گیتهاب torvalds
-یا: گیتهاب https://github.com/user/repo
-(دانلود zip ریپو)
-
-📷 اسکن QR — ریپلای روی عکس + اسکن
-🝰 ساخت QR — کد متن شما""",
-        'crypto_text_help': """📖 راهنمای متن رمزی
-
-🔐 رمزنگاری ایموجی
-ریپلای روی پیام + رمزنگاری
-یا: رمزنگاری ایموجی
-
-🔢 رمزنگاری عدد
-ریپلای + رمزنگاری عدد
-
-🔓 رمزگشایی
-ریپلای روی پیام رمزشده + رمزگشایی
-
-طرف مقابل با سلف می‌تواند رمزگشایی کند.""",
-        'btnset_help': """📖 تنظیم دکمه‌ها
-
-روی هر بخش بزنید تا رنگش عوض شود:
-🔵 آبی  🟢 سبز  🔴 قرمز
-
-روی منوی اصلی اعمال می‌شود.""",
         'fortune_help': f'fortune_menu_{user_id}',
-        'crypto_help': f'crypto_menu_{user_id}',
+        'crypto_help': """📖 راهنمای ارزها
+
+دستورات تک‌کلمه (قیمت همان لحظه):
+• دلار
+• تتر
+• طلا
+• یوان / یوان چین
+• یورو ، پوند ، درهم ، لیر
+• بیتکوین ، اتریوم ، تون ، سولانا ، ...
+
+لیست کامل نرخ:
+• نرخ ارز
+
+مثال:
+دلار
+طلا
+یوان چین
+بیتکوین""",
         'bio_help': f'bio_menu_{user_id}',
         'learning_help': f'tools_menu_{user_id}',
         'backup_help': f'backup_menu_{user_id}',
         'numeric_id_help': f'tools_menu_{user_id}',
         'user_panel_help': f'general_menu_{user_id}',
-        'lock_help': f'lock_menu_{user_id}',
+        'widgets_help': f'widgets_menu_{user_id}',
+        'crypto_text_help': f'secret_menu_{user_id}',
+        'btnset_help': f'btnset_menu_{user_id}',
+        'video_note_help': f'tools_menu_{user_id}',
+        'app_download_help': f'google_menu_{user_id}',
+        'calc_help': f'widgets_menu_{user_id}',
+        'weather_help': f'widgets_menu_{user_id}',
+        'wiki_help': f'widgets_menu_{user_id}',
+        'github_help': f'widgets_menu_{user_id}',
     }
     if cmd.endswith('_help') or cmd in HELP_TEXTS:
         help_body = HELP_TEXTS.get(cmd) or HELP_TEXTS.get(cmd.replace('_help', '') + '_help') or (
@@ -13614,41 +13797,77 @@ OCR روی عکس (ریپلای)
             pass
         return
     
+    if cmd == 'btnset_noop':
+        try:
+            await query.answer()
+        except Exception:
+            pass
+        return
+    if cmd.startswith('btnsetpage_'):
+        try:
+            page = int(cmd.split('_')[1])
+        except Exception:
+            page = 0
+        try:
+            await safe_edit_panel(query, "🎨 تنظیم رنگ دکمه‌ها", reply_markup=get_btnset_menu_keyboard(user_id, page=page))
+        except Exception:
+            try:
+                await query.edit_message_reply_markup(reply_markup=get_btnset_menu_keyboard(user_id, page=page))
+            except Exception:
+                pass
+        return
+    # exec_btnset_KEY_STYLE_userid → cmd becomes btnset_KEY_STYLE after user id strip
+    if cmd.startswith('btnset_') and not cmd.startswith('btnsetpage_') and cmd not in ('btnset_help', 'btnset_noop'):
+        rest = cmd[len('btnset_'):]
+        parts_b = rest.rsplit('_', 1)
+        # rest like time_primary or time_none
+        if '_' in rest:
+            key, style = rest.rsplit('_', 1)
+            if style not in ('primary', 'success', 'danger', 'none', 'off'):
+                # maybe key has underscore
+                key, style = rest, 'primary'
+            styles = get_btn_styles(user_id)
+            if style in ('none', 'off'):
+                styles[key] = 'none'
+            else:
+                styles[key] = style
+            try:
+                import json as _json
+                db.update_selfbot_setting(user_id, 'btn_styles', _json.dumps(styles, ensure_ascii=False))
+            except Exception as e:
+                logger.error(f"btnset save: {e}")
+            # stay on same page 0 for simplicity; could encode page later
+            try:
+                await safe_edit_panel(query, f"🎨 {key} → {style}", reply_markup=get_btnset_menu_keyboard(user_id, page=0))
+            except Exception:
+                try:
+                    await query.edit_message_reply_markup(reply_markup=get_btnset_menu_keyboard(user_id, page=0))
+                except Exception:
+                    pass
+        return
     if cmd.startswith('btnstyle_'):
         key = cmd[len('btnstyle_'):]
-        # strip trailing user id if glued wrong - cmd is btnstyle_time from exec_btnstyle_time_USER
-        # actual parse: parts already stripped; cmd might be btnstyle_time
         if key == 'reset':
             try:
                 db.update_selfbot_setting(user_id, 'btn_styles', '{}')
             except Exception:
                 pass
             try:
-                await refresh_panel_keyboard(query, user_id, "🎨 رنگ‌ها ریست شد", get_btnset_menu_keyboard)
+                await safe_edit_panel(query, "🎨 رنگ‌ها ریست شد", reply_markup=get_btnset_menu_keyboard(user_id, page=0))
             except Exception:
                 pass
             return
-        # key may include nothing extra
-        key = key.strip('_')
-        if key in get_btn_styles(user_id):
-            nxt = cycle_btn_style(user_id, key)
-            try:
-                await refresh_panel_keyboard(query, user_id, f"🎨 {_STYLE_LABEL.get(nxt, nxt)} — ذخیره شد", get_btnset_menu_keyboard)
-            except Exception:
-                pass
         return
     if cmd == 'btnset_help':
         try:
             await safe_edit_panel(
                 query,
                 "🎨 راهنمای تنظیم دکمه‌ها\n\n"
-                "روی هر بخش بزنید تا رنگش عوض شود:\n"
-                "🔵 آبی (primary)\n"
-                "🟢 سبز (success)\n"
-                "🔴 قرمز (danger)\n\n"
-                "رنگ روی دکمه‌های منوی اصلی اعمال می‌شود.\n"
-                "ریست رنگ‌ها همه را به پیش‌فرض برمی‌گرداند.",
-                reply_markup=get_btnset_menu_keyboard(user_id),
+                "هر ردیف یک بخش از پنل اصلی است.\n"
+                "🔵 آبی  🟢 سبز  🔴 قرمز  ⬜ بی‌رنگ\n\n"
+                "با زدن هر رنگ، همان بخش در منوی اصلی همان رنگ می‌شود.\n"
+                "از دکمه‌های قبل/بعد برای صفحات بعدی استفاده کنید.",
+                reply_markup=get_btnset_menu_keyboard(user_id, page=0),
             )
         except Exception:
             pass
