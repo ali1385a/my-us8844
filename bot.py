@@ -100,7 +100,7 @@ def home():
     return jsonify({
         "status": "running",
         "bot": "VROOM",
-        "version": "5.0.0"
+        "version": "5.1.0"
     })
 
 @flask_app.route('/health')
@@ -961,7 +961,7 @@ SPAM_MESSAGES = [
     "کص ننت تو فروشگاه تنگستن کس داد، تنگستن کس شد و شکست",
 ]
 
-BOT_VERSION = "5.0.0"
+BOT_VERSION = "5.1.0"
 BOT_CREATOR = "VROOM"
 PANEL_HEADER_IMAGE = "panel_header.png"  # تصویر بالای پنل (تصویر جدید VROOM)
 
@@ -2946,7 +2946,17 @@ async def get_ai_response(text, ai_type=1, user_id=None):
         }
         data = {
             "model": KIRA_CHAT_MODEL,
-            "messages": [{"role": "user", "content": text}],
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "تو یک دستیار هوشمند فارسی هستی. فقط مستقیم و مفید جواب بده. "
+                        "هرگز خودت را معرفی نکن، نام مدل نگو، لینک سایت نده و امضا نگذار مگر کاربر صریحاً بخواهد. "
+                        "پاسخ کوتاه و واضح باشد."
+                    ),
+                },
+                {"role": "user", "content": text},
+            ],
             "temperature": 0.7,
             "max_tokens": 2048
         }
@@ -2975,9 +2985,17 @@ async def kira_generate_image(prompt: str) -> str:
             "model": KIRA_IMAGE_MODEL,
             "prompt": prompt,
             "n": 1,
-            "size": "1024x1024"
+            "size": "1024x1024",
+            "response_format": "url",
         }
-        response = requests.post(KIRA_IMAGE_URL, headers=headers, json=data, timeout=120)
+        response = requests.post(KIRA_IMAGE_URL, headers=headers, json=data, timeout=180)
+        if response.status_code != 200:
+            # تلاش بدون response_format / مدل جایگزین
+            for model_try in (KIRA_IMAGE_MODEL, "dall-e-3", "kira-image-2.0"):
+                data2 = {"model": model_try, "prompt": prompt, "n": 1, "size": "1024x1024"}
+                response = requests.post(KIRA_IMAGE_URL, headers=headers, json=data2, timeout=180)
+                if response.status_code == 200:
+                    break
         if response.status_code != 200:
             logger.error(f"Kira image HTTP {response.status_code}: {response.text[:400]}")
             return None
@@ -3060,7 +3078,7 @@ COMMAND_ROOTS = {
     'یادگیری', 'بکاپ', 'بکاب', 'اتمام', 'فال', 'اطلاعات', '.بن', '.انبن', 'بن', 'انبن', 'دارت', 'بسکتبال', 'فوتبال', '.بن', '.انبن', 'بن', 'انبن',
     'یوزرنیم',
     'یوزنیم', 'ایدی', 'آیدی', 'آیدی\u200cعددی', 'ایدی\u200cعددی', 'username', 'id',
-    'فیلتر', 'ویس', 'صدا', 'ویدیوبهویس', 'ویدیو_به_ویس', 'کیرا', 'هوش', 'عکس', 'رمزنگاری', 'رمزگشایی', 'ساعت', 'جهانی', 'همیشه', 'نقطه', 'اسکن', 'qr', 'QR', 'github', 'گیت‌هاب', 'گیتهاب', 'ویکی', 'هوا', 'ماشین', 'حساب',
+    'فیلتر', 'ویس', 'صدا', 'ویدیوبهویس', 'ویدیو_به_ویس', 'کیرا', 'هوش', 'عکس', 'رمزنگاری', 'رمزگشایی', 'ساعت', 'جهانی', 'همیشه', 'نقطه', 'اسکن', 'qr', 'QR', 'حساب', 'هوا', 'ویدیونوت', 'ویدیو', 'github', 'گیت‌هاب', 'گیتهاب', 'ویکی', 'هوا', 'ماشین', 'حساب',
 }
 
 def is_bot_command_text(text: str) -> bool:
@@ -3101,7 +3119,9 @@ def is_bot_command_text(text: str) -> bool:
             return True
     parts = t.split()
     cmd = parts[0]
-    if cmd not in COMMAND_ROOTS and not cmd.startswith('.'):
+    if cmd.startswith('.'):
+        cmd = cmd[1:]
+    if cmd not in COMMAND_ROOTS and not parts[0].startswith('.') and not parts[0].startswith('/'):
         return False
     # دستورات تک‌کلمه‌ای حساس: فقط اگر کل پیام همان دستور باشد (یا فقط با آرگومان‌های کوتاه)
     alone_cmds = {
@@ -3570,7 +3590,7 @@ class SelfBotManager:
             if post_key in self.auto_comment_sent:
                 return
             config = self.auto_comment_settings[cid]
-            await asyncio.sleep(0.5)
+            # ارسال فوری بدون تأخیر
             await self.client.send_message(
                 chat.id,
                 config['text'],
@@ -3990,6 +4010,11 @@ class SelfBotManager:
             return
         
         cmd = parts[0]
+        # نقطه قبل دستور: .تایم → تایم (تا همه هندلرها کار کنند)
+        if cmd.startswith('.'):
+            cmd = cmd[1:]
+        if cmd.startswith('/'):
+            cmd = cmd[1:]
         args = parts[1:] if len(parts) > 1 else []
 
         # بن / انبن فقط ادمین
@@ -4643,7 +4668,47 @@ class SelfBotManager:
         # ========== دلار / نرخ / نام کوین → کارت سایبرپانک ==========
         raw_full = (event.raw_text or event.text or '').strip()
         raw_low = raw_full.lower()
-        is_rate_cmd = cmd in ('دلار', 'نرخ') or (cmd == 'نرخ' and args and args[0] == 'ارز') or raw_low in ('نرخ ارز', 'قیمت ارز', 'ارزها', 'کریپتو', 'بازار')
+        # فقط «دلار» → قیمت دقیق تتر/دلار از نوبیتکس (نه لیست کامل)
+        if cmd in ('دلار',) and not args:
+            try:
+                await event.edit("💵 در حال دریافت قیمت دلار...")
+                usdt_irt = None
+                # نوبیتکس
+                try:
+                    r = requests.get("https://api.nobitex.ir/v2/orderbook/USDTIRT", timeout=10)
+                    if r.status_code == 200:
+                        j = r.json()
+                        asks = (j.get("asks") or j.get("lastTradePrice") or None)
+                        if isinstance(j.get("lastTradePrice"), (int, float, str)):
+                            usdt_irt = float(j.get("lastTradePrice"))
+                        elif j.get("asks") and len(j["asks"]) > 0:
+                            usdt_irt = float(j["asks"][0][0])
+                except Exception as e:
+                    logger.debug(f"nobitex orderbook: {e}")
+                if not usdt_irt:
+                    try:
+                        r = requests.get("https://api.nobitex.ir/market/stats", timeout=10)
+                        j = r.json()
+                        st = (j.get("stats") or {}).get("usdt-irt") or {}
+                        usdt_irt = float(st.get("latest") or st.get("bestSell") or st.get("bestBuy") or 0)
+                    except Exception as e:
+                        logger.debug(f"nobitex stats: {e}")
+                if not usdt_irt:
+                    prices = await fetch_crypto_prices()
+                    usdt_irt = float((prices or {}).get("USDT/IRT", 0) or 0)
+                if usdt_irt and usdt_irt > 0:
+                    await event.edit(
+                        f"💵 <b>قیمت دلار (تتر)</b>\n\n"
+                        f"▫️ <code>{_fmt_price(usdt_irt)}</code> تومان\n"
+                        f"📡 منبع: نوبیتکس",
+                        parse_mode='html'
+                    )
+                else:
+                    await event.edit("❌ قیمت دلار در دسترس نیست")
+            except Exception as e:
+                await event.edit(f"❌ خطا: {e}")
+            return
+        is_rate_cmd = (cmd == 'نرخ') or (cmd == 'نرخ' and args and args[0] == 'ارز') or raw_low in ('نرخ ارز', 'قیمت ارز', 'ارزها', 'کریپتو', 'بازار')
         symbol_try = PERSIAN_COIN_MAP.get(raw_low) or PERSIAN_COIN_MAP.get(cmd)
         if not symbol_try and cmd.upper() in ('BTC','ETH','TON','SOL','BNB','XRP','DOGE','NOT','PEPE','ADA','LINK','AVAX','USDT','TRX','SHIB'):
             symbol_try = cmd.upper()
@@ -6639,6 +6704,110 @@ class SelfBotManager:
                 await event.edit(f"❌ {str(e)[:100]}")
             return
 
+
+        # ========== خط به صدا / صدا به خط (Kira TTS/STT) ==========
+        if command_text.startswith('خط به صدا') or (cmd == 'خط' and args and args[0] == 'به' and len(args) > 1 and args[1] == 'صدا'):
+            text_src = command_text
+            for p in ('خط به صدا',):
+                if text_src.startswith(p):
+                    text_src = text_src[len(p):].strip()
+            if not text_src and event.is_reply:
+                rm = await event.get_reply_message()
+                if rm and rm.text:
+                    text_src = rm.text
+            if not text_src:
+                await event.edit("❌ مثال: خط به صدا سلام خوبی؟\\nیا ریپلای روی متن + خط به صدا")
+                return
+            await event.edit("🔊 در حال ساخت صدا...")
+            path_out = await kira_text_to_speech(text_src)
+            if path_out and os.path.exists(path_out):
+                await self.client.send_file(chat_id, path_out, voice_note=True, caption=None)
+                try:
+                    os.remove(path_out)
+                except Exception:
+                    pass
+                try:
+                    await event.delete()
+                except Exception:
+                    pass
+            else:
+                await event.edit("❌ ساخت صدا ناموفق بود (API)")
+            return
+
+        if command_text.startswith('صدا به خط') or (cmd == 'صدا' and args and args[0] == 'به' and len(args) > 1 and args[1] == 'خط'):
+            if not event.is_reply:
+                await event.edit("❌ روی یک ویس/صدا ریپلای کنید و بنویسید: صدا به خط")
+                return
+            await event.edit("🎙 در حال تبدیل صدا به متن...")
+            rm = await event.get_reply_message()
+            if not rm or not (rm.voice or rm.audio or rm.document):
+                await event.edit("❌ پیام ریپلای‌شده ویس نیست")
+                return
+            try:
+                media_path = await self.client.download_media(rm)
+                text_out = await kira_speech_to_text(media_path)
+                try:
+                    if media_path and os.path.exists(media_path):
+                        os.remove(media_path)
+                except Exception:
+                    pass
+                if text_out:
+                    await event.edit(f"📝 متن:\\n\\n{text_out[:3500]}")
+                else:
+                    await event.edit("❌ تبدیل ناموفق بود. API یا فرمت فایل را بررسی کنید.")
+            except Exception as e:
+                await event.edit(f"❌ {e}")
+            return
+
+        # ========== ویدیو گرد (video note) ==========
+        if (cmd == 'ویدیو' and args and args[0] == 'گرد') or command_text.strip() in ('ویدیو گرد', 'ویدیونوت', 'ویدیو نوت'):
+            if not event.is_reply:
+                await event.edit("❌ روی یک ویدیو ریپلای کنید و بنویسید: ویدیو گرد")
+                return
+            await event.edit("🔵 در حال تبدیل به ویدیو گرد...")
+            rm = await event.get_reply_message()
+            if not rm or not (rm.video or rm.document or rm.video_note):
+                await event.edit("❌ ریپلای باید روی ویدیو باشد")
+                return
+            try:
+                import tempfile, subprocess
+                src = await self.client.download_media(rm)
+                if not src:
+                    await event.edit("❌ دانلود ویدیو ناموفق")
+                    return
+                out = os.path.join(tempfile.gettempdir(), f"vnote_{self.user_id}.mp4")
+                # مربع حداکثر 384px، حداکثر حدود 60 ثانیه
+                cmd_ff = [
+                    "ffmpeg", "-y", "-i", src,
+                    "-t", "60",
+                    "-vf", "scale=384:384:force_original_aspect_ratio=increase,crop=384:384",
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
+                    "-c:a", "aac", "-ac", "1", "-b:a", "64k",
+                    "-movflags", "+faststart",
+                    out
+                ]
+                subprocess.run(cmd_ff, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
+                if os.path.exists(out) and os.path.getsize(out) > 1000:
+                    await self.client.send_file(chat_id, out, video_note=True)
+                    try:
+                        await event.delete()
+                    except Exception:
+                        pass
+                else:
+                    await event.edit("❌ تبدیل ناموفق — ffmpeg را نصب کنید")
+                try:
+                    os.remove(src)
+                except Exception:
+                    pass
+                try:
+                    if os.path.exists(out):
+                        os.remove(out)
+                except Exception:
+                    pass
+            except Exception as e:
+                await event.edit(f"❌ {e}")
+            return
+
         # ========== رمزنگاری ==========
         if cmd == 'رمزنگاری':
             mode = 'emoji'
@@ -8605,7 +8774,6 @@ class SelfBotManager:
     async def translate_text(self, text, peer_user_id=None):
         if not text or not str(text).strip():
             return text
-        # اولویت: ترجمه مخصوص همان کاربر (پنل کاربر)
         modes = None
         if peer_user_id is not None:
             put = getattr(self, 'per_user_translate', {}) or {}
@@ -8617,51 +8785,70 @@ class SelfBotManager:
         active = [lang for lang, st in (modes or {}).items() if st]
         if not active:
             return text
-        try:
-            from deep_translator import GoogleTranslator
-        except Exception as e:
-            logger.error(f"deep_translator missing: {e}")
-            return text
         lang = active[0]
         target_code = TRANSLATE_LANG_CODES.get(lang, lang)
-        # hebrew fix
         if target_code == 'iw':
             target_code = 'iw'
-        try:
-            # تکه کردن متن بلند (Google ~4500 char limit)
-            raw = str(text)
-            max_chunk = 4000
-            chunks = []
-            if len(raw) <= max_chunk:
-                chunks = [raw]
-            else:
-                buf = raw
-                while buf:
-                    if len(buf) <= max_chunk:
-                        chunks.append(buf)
-                        break
-                    cut = buf.rfind(' ', 0, max_chunk)
-                    if cut < max_chunk // 2:
-                        cut = max_chunk
-                    chunks.append(buf[:cut])
-                    buf = buf[cut:].lstrip()
-            out_parts = []
-            for ch in chunks:
+        raw = str(text)
+        max_chunk = 450
+        chunks = []
+        buf = raw
+        while buf:
+            if len(buf) <= max_chunk:
+                chunks.append(buf)
+                break
+            cut = buf.rfind(' ', 0, max_chunk)
+            if cut < max_chunk // 2:
+                cut = max_chunk
+            chunks.append(buf[:cut])
+            buf = buf[cut:].lstrip()
+        out_parts = []
+        for ch in chunks:
+            translated = None
+            # 1) deep_translator با چند تلاش
+            for attempt in range(3):
                 try:
-                    result = await asyncio.wait_for(
+                    from deep_translator import GoogleTranslator
+                    translated = await asyncio.wait_for(
                         asyncio.to_thread(
                             GoogleTranslator(source='auto', target=target_code).translate, ch
                         ),
-                        timeout=20
+                        timeout=25
                     )
-                    out_parts.append(result if result else ch)
+                    if translated:
+                        break
                 except Exception as e:
-                    logger.error(f"translate chunk error: {e}")
-                    out_parts.append(ch)
-            return '\n'.join(out_parts) if out_parts else text
-        except Exception as e:
-            logger.error(f"translate_text: {e}")
-            return text
+                    logger.debug(f"translate attempt {attempt}: {e}")
+                    await asyncio.sleep(1.5 * (attempt + 1))
+            # 2) MyMemory fallback
+            if not translated:
+                try:
+                    mm = requests.get(
+                        "https://api.mymemory.translated.net/get",
+                        params={"q": ch[:500], "langpair": f"autodetect|{target_code if target_code != 'iw' else 'he'}"},
+                        timeout=15,
+                    )
+                    if mm.status_code == 200:
+                        translated = (mm.json().get("responseData") or {}).get("translatedText")
+                except Exception as e:
+                    logger.debug(f"mymemory: {e}")
+            # 3) LibreTranslate public (best effort)
+            if not translated:
+                try:
+                    lt = requests.post(
+                        "https://libretranslate.com/translate",
+                        json={"q": ch, "source": "auto", "target": target_code if target_code != 'iw' else "he", "format": "text"},
+                        timeout=20,
+                        headers={"User-Agent": "SelfBot"},
+                    )
+                    if lt.status_code == 200:
+                        translated = lt.json().get("translatedText")
+                except Exception as e:
+                    logger.debug(f"libre: {e}")
+            out_parts.append(translated if translated else ch)
+            await asyncio.sleep(0.35)  # فاصله برای جلوگیری از rate limit
+        return '\n'.join(out_parts) if out_parts else text
+
 
     async def handle_google_search(self, event, query):
         """جستجوی هوشمند: برنامه / فیلم / آهنگ / لینک — وقتی سرچ روشن است."""
@@ -8704,6 +8891,35 @@ class SelfBotManager:
                 await event.edit(f'❌ هیچ نتیجه‌ای برای "{q}" پیدا نشد.')
                 return
             self.last_search_results = items
+            # تلاش برای ارسال فایل apk اگر لینک مستقیم بود
+            if is_app and not want_link_only:
+                for it in items:
+                    link = it.get("link") or ""
+                    if link.lower().endswith(".apk"):
+                        try:
+                            await event.edit(f"⬇️ در حال دانلود APK...\n{link[:80]}")
+                            rr = requests.get(link, timeout=60, headers={"User-Agent": "Mozilla/5.0"})
+                            if rr.status_code == 200 and len(rr.content) > 10000:
+                                import tempfile
+                                apk_path = os.path.join(tempfile.gettempdir(), "app_download.apk")
+                                with open(apk_path, "wb") as af:
+                                    af.write(rr.content)
+                                await self.client.send_file(
+                                    event.chat_id, apk_path,
+                                    caption=f"📥 {q}\n{link}",
+                                    reply_to=event.message.id if event.message else None,
+                                )
+                                try:
+                                    os.remove(apk_path)
+                                except Exception:
+                                    pass
+                                try:
+                                    await event.delete()
+                                except Exception:
+                                    pass
+                                return
+                        except Exception as e:
+                            logger.debug(f"apk dl: {e}")
             if want_link_only:
                 links = [it.get('link', '') for it in items[:5] if it.get('link')]
                 msg = "🔗 لینک‌ها:\n\n" + "\n".join(f"• {l}" for l in links)
@@ -9516,7 +9732,9 @@ def get_main_panel_keyboard(user_id):
             InlineKeyboardButton("🔮 فال", callback_data=f"fortune_menu_{user_id}", style="primary")
         ],
         [
-            InlineKeyboardButton("📦 بکاپ‌گیری", callback_data=f"backup_menu_{user_id}", style="primary"),
+            InlineKeyboardButton("🔐 متن رمزی", callback_data=f"secret_menu_{user_id}"),
+            InlineKeyboardButton("🧩 ابزارک‌ها", callback_data=f"widgets_menu_{user_id}"),
+            InlineKeyboardButton("📦 بکاپ‌گیری", callback_data=f"backup_menu_{user_id}"),
         ],
         [
             InlineKeyboardButton("✖️ بستن پنل", callback_data=f"close_panel_{user_id}", style="danger")
@@ -9822,70 +10040,41 @@ def get_message_menu_keyboard(user_id):
 def get_tools_menu_keyboard(user_id):
     settings = db.get_selfbot_settings(user_id)
     self_on = bool(settings.get('selfbot_enabled', 1))
-    always_on = bool(settings.get('always_online', 0))
-    dot_on = bool(settings.get('command_dot_required', 0))
     keyboard = [
         [
-            InlineKeyboardButton("📊 امار گپ", callback_data=f"exec_stats_{user_id}", style="primary"),
-            InlineKeyboardButton("🝰 کد QR", callback_data=f"exec_qr_{user_id}", style="primary")
+            InlineKeyboardButton("📊 امار گپ", callback_data=f"exec_stats_{user_id}"),
+            InlineKeyboardButton("🝰 کد QR", callback_data=f"exec_qr_{user_id}")
         ],
         [
-            InlineKeyboardButton("📷 اسکن QR", callback_data=f"exec_qr_scan_{user_id}", style="primary"),
-            InlineKeyboardButton("🌍 ساعت جهانی", callback_data=f"exec_world_time_{user_id}", style="primary")
+            InlineKeyboardButton("👑 تگ ادمین", callback_data=f"exec_tag_admin_{user_id}"),
+            InlineKeyboardButton("📌 پین", callback_data=f"exec_pin_{user_id}")
         ],
         [
-            InlineKeyboardButton("🔢 ماشین حساب", callback_data=f"exec_calc_help_{user_id}", style="primary"),
-            InlineKeyboardButton("🌤 آب و هوا", callback_data=f"exec_weather_help_{user_id}", style="primary")
+            InlineKeyboardButton(f"{'✓ ' if self_on else ''}🤖 سلف روشن", callback_data=f"exec_self_on_{user_id}"),
+            InlineKeyboardButton(f"{'✓ ' if not self_on else ''}⛔ سلف خاموش", callback_data=f"exec_self_off_{user_id}")
         ],
         [
-            InlineKeyboardButton("📚 ویکی‌پدیا", callback_data=f"exec_wiki_help_{user_id}", style="primary"),
-            InlineKeyboardButton("🐙 گیت‌هاب", callback_data=f"exec_github_help_{user_id}", style="primary")
+            InlineKeyboardButton("🎨 ساخت استیکر", callback_data=f"exec_make_sticker_{user_id}"),
+            InlineKeyboardButton("🔢 ایدی عددی", callback_data=f"exec_numeric_id_help_{user_id}"),
         ],
         [
-            InlineKeyboardButton("🔐 رمزنگاری ایموجی", callback_data=f"exec_enc_emoji_{user_id}", style="primary"),
-            InlineKeyboardButton("🔢 رمزنگاری عدد", callback_data=f"exec_enc_num_{user_id}", style="primary")
+            InlineKeyboardButton("🎙 ویدیو → ویس", callback_data=f"exec_video_to_voice_{user_id}"),
+            InlineKeyboardButton("🔵 ویدیو گرد", callback_data=f"exec_video_note_help_{user_id}"),
         ],
         [
-            InlineKeyboardButton("🔓 رمزگشایی", callback_data=f"exec_decrypt_{user_id}", style="success"),
-            InlineKeyboardButton("🔤 فونت ساعت", callback_data=f"font_menu_{user_id}", style="primary")
+            InlineKeyboardButton(f"{'✓ ' if db.get_learning_enabled(user_id) else ''}🧠 یادگیری روشن", callback_data=f"exec_learning_on_{user_id}"),
+            InlineKeyboardButton(f"{'✓ ' if not db.get_learning_enabled(user_id) else ''}🧠 یادگیری خاموش", callback_data=f"exec_learning_off_{user_id}"),
         ],
         [
-            InlineKeyboardButton(f"{'✓ ' if always_on else ''}🟢 همیشه آنلاین", callback_data=f"exec_always_online_on_{user_id}", style="success" if always_on else "primary"),
-            InlineKeyboardButton(f"{'✓ ' if not always_on else ''}⚫ آفلاین عادی", callback_data=f"exec_always_online_off_{user_id}", style="danger" if not always_on else "primary")
+            InlineKeyboardButton("📋 لیست یادگیری", callback_data=f"exec_learning_list_{user_id}"),
+            InlineKeyboardButton("📖 راهنما یادگیری", callback_data=f"exec_learning_help_{user_id}"),
         ],
         [
-            InlineKeyboardButton(f"{'✓ ' if dot_on else ''}• نقطه قبل دستور روشن", callback_data=f"exec_dot_on_{user_id}", style="success" if dot_on else "primary"),
-            InlineKeyboardButton(f"{'✓ ' if not dot_on else ''}• نقطه خاموش", callback_data=f"exec_dot_off_{user_id}", style="danger" if not dot_on else "primary")
+            InlineKeyboardButton("🗑 ریست دیتابیس", callback_data=f"exec_reset_db_{user_id}"),
+            InlineKeyboardButton("📖 راهنما ابزار", callback_data=f"exec_tools_help_{user_id}")
         ],
         [
-            InlineKeyboardButton("👑 تگ ادمین", callback_data=f"exec_tag_admin_{user_id}", style="primary"),
-            InlineKeyboardButton("📌 پین", callback_data=f"exec_pin_{user_id}", style="primary")
-        ],
-        [
-            InlineKeyboardButton(f"{'✓ ' if self_on else ''}🤖 سلف روشن", callback_data=f"exec_self_on_{user_id}", style="success" if self_on else "primary"),
-            InlineKeyboardButton(f"{'✓ ' if not self_on else ''}⛔ سلف خاموش", callback_data=f"exec_self_off_{user_id}", style="danger" if not self_on else "primary")
-        ],
-        [
-            InlineKeyboardButton("🎨 ساخت استیکر", callback_data=f"exec_make_sticker_{user_id}", style="success"),
-            InlineKeyboardButton("🔢 ایدی عددی", callback_data=f"exec_numeric_id_help_{user_id}", style="primary"),
-        ],
-        [
-            InlineKeyboardButton("🎙 ویدیو → ویس", callback_data=f"exec_video_to_voice_{user_id}", style="success"),
-        ],
-        [
-            InlineKeyboardButton(f"{'✓ ' if db.get_learning_enabled(user_id) else ''}🧠 یادگیری روشن", callback_data=f"exec_learning_on_{user_id}", style="success" if db.get_learning_enabled(user_id) else "primary"),
-            InlineKeyboardButton(f"{'✓ ' if not db.get_learning_enabled(user_id) else ''}🧠 یادگیری خاموش", callback_data=f"exec_learning_off_{user_id}", style="danger" if not db.get_learning_enabled(user_id) else "primary"),
-        ],
-        [
-            InlineKeyboardButton("📋 لیست یادگیری", callback_data=f"exec_learning_list_{user_id}", style="primary"),
-            InlineKeyboardButton("📖 راهنما یادگیری", callback_data=f"exec_learning_help_{user_id}", style="primary"),
-        ],
-        [
-            InlineKeyboardButton("🗑 ریست دیتابیس", callback_data=f"exec_reset_db_{user_id}", style="danger"),
-            InlineKeyboardButton("📖 راهنما ابزار", callback_data=f"exec_tools_help_{user_id}", style="primary")
-        ],
-        [
-            InlineKeyboardButton("⚈ بازگشت", callback_data=f"back_main", style="danger")
+            InlineKeyboardButton("⚈ بازگشت", callback_data=f"back_main")
         ]
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -10283,22 +10472,28 @@ def get_crypto_menu_keyboard(user_id):
 
 def get_google_menu_keyboard(user_id):
     search_on = False
-    if str(user_id) in selfbot_managers:
-        search_on = bool(getattr(selfbot_managers[str(user_id)], 'search_mode', False))
+    try:
+        if str(user_id) in selfbot_managers:
+            search_on = bool(getattr(selfbot_managers[str(user_id)], 'search_mode', False))
+    except Exception:
+        pass
     keyboard = [
         [
-            InlineKeyboardButton(f"{'✓ ' if search_on else ''}🔍 سرچ", callback_data=f"exec_search_on_{user_id}", style="success" if search_on else "primary"),
-            InlineKeyboardButton(f"{'✓ ' if not search_on else ''}❌ خروج جستجو", callback_data=f"exec_search_off_{user_id}", style="danger" if not search_on else "primary"),
-            InlineKeyboardButton("🎵 اهنگ", callback_data=f"exec_music_{user_id}", style="primary")
+            InlineKeyboardButton(f"{'✓ ' if search_on else ''}🔎 سرچ روشن", callback_data=f"exec_search_on_{user_id}"),
+            InlineKeyboardButton(f"{'✓ ' if not search_on else ''}🔎 سرچ خاموش", callback_data=f"exec_search_off_{user_id}"),
         ],
         [
-            InlineKeyboardButton("📖 راهنما", callback_data=f"exec_google_help_{user_id}", style="primary")
+            InlineKeyboardButton("📥 دانلود برنامه", callback_data=f"exec_app_download_help_{user_id}"),
         ],
         [
-            InlineKeyboardButton("⚈ بازگشت", callback_data=f"back_main", style="danger")
-        ]
+            InlineKeyboardButton("📖 راهنما", callback_data=f"exec_google_help_{user_id}"),
+        ],
+        [
+            InlineKeyboardButton("⚈ بازگشت", callback_data=f"back_main"),
+        ],
     ]
     return InlineKeyboardMarkup(keyboard)
+
 
 def get_profile_menu_keyboard(user_id):
     keyboard = [
@@ -10490,6 +10685,52 @@ def get_protection_menu_keyboard(user_id):
     ]
     return InlineKeyboardMarkup(keyboard)
 
+
+def get_crypto_text_menu_keyboard(user_id):
+    """رمزنگاری / رمزگشایی"""
+    keyboard = [
+        [
+            InlineKeyboardButton("🔐 رمزنگاری ایموجی", callback_data=f"exec_enc_emoji_{user_id}"),
+            InlineKeyboardButton("🔢 رمزنگاری عدد", callback_data=f"exec_enc_num_{user_id}"),
+        ],
+        [
+            InlineKeyboardButton("🔓 رمزگشایی", callback_data=f"exec_decrypt_{user_id}"),
+        ],
+        [
+            InlineKeyboardButton("📖 راهنما", callback_data=f"exec_crypto_text_help_{user_id}"),
+        ],
+        [
+            InlineKeyboardButton("⚈ بازگشت", callback_data=f"back_main"),
+        ],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def get_widgets_menu_keyboard(user_id):
+    """ابزارک‌ها: ماشین‌حساب، آب‌وهوا، ویکی، گیت‌هاب، اسکن QR"""
+    keyboard = [
+        [
+            InlineKeyboardButton("🔢 ماشین حساب", callback_data=f"exec_calc_help_{user_id}"),
+            InlineKeyboardButton("🌤 آب و هوا", callback_data=f"exec_weather_help_{user_id}"),
+        ],
+        [
+            InlineKeyboardButton("📚 ویکی‌پدیا", callback_data=f"exec_wiki_help_{user_id}"),
+            InlineKeyboardButton("🐙 گیت‌هاب", callback_data=f"exec_github_help_{user_id}"),
+        ],
+        [
+            InlineKeyboardButton("📷 اسکن QR", callback_data=f"exec_qr_scan_{user_id}"),
+            InlineKeyboardButton("🝰 ساخت QR", callback_data=f"exec_qr_{user_id}"),
+        ],
+        [
+            InlineKeyboardButton("📖 راهنما", callback_data=f"exec_widgets_help_{user_id}"),
+        ],
+        [
+            InlineKeyboardButton("⚈ بازگشت", callback_data=f"back_main"),
+        ],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
 def get_ai_menu_keyboard(user_id):
     settings = db.get_selfbot_settings(user_id)
     ai = settings.get('ai_status') or {}
@@ -10507,10 +10748,10 @@ def get_ai_menu_keyboard(user_id):
         ],
         [
             InlineKeyboardButton("🖼 ساخت عکس", callback_data=f"exec_ai_image_{user_id}", style="primary"),
-            InlineKeyboardButton("🔊 متن → ویس", callback_data=f"exec_ai_tts_{user_id}", style="primary"),
+            InlineKeyboardButton("🔊 خط به صدا", callback_data=f"exec_ai_tts_{user_id}"),
         ],
         [
-            InlineKeyboardButton("🎙 ویس → متن", callback_data=f"exec_ai_stt_{user_id}", style="primary"),
+            InlineKeyboardButton("🎙 صدا به خط", callback_data=f"exec_ai_stt_{user_id}"),
             InlineKeyboardButton("💬 چت با Kira", callback_data=f"exec_ai_chat_{user_id}", style="primary"),
         ],
         [
@@ -11046,6 +11287,8 @@ async def _button_callback_impl(update: Update, context: ContextTypes.DEFAULT_TY
             "change": ("✏️ تغییر پروفایل", get_change_menu_keyboard),
             "enemy": ("👹 دشمنان", get_enemy_menu_keyboard),
             "filter": ("🚫 فیلتر کلمات", get_filter_menu_keyboard),
+            "secret": ("🔐 متن رمزی", get_crypto_text_menu_keyboard),
+            "widgets": ("🧩 ابزارک‌ها", get_widgets_menu_keyboard),
             "pclock": ("🕰 ساعت در پروفایل", get_profile_clock_menu_keyboard),
             "protection": ("🛡 حفاظت اسپم", get_protection_menu_keyboard),
             "ai": ("🤖 هوش مصنوعی", get_ai_menu_keyboard),
@@ -11160,11 +11403,21 @@ async def exec_command_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 await msg.delete()
         except Exception:
             pass
+        kb = get_filter_menu_keyboard(user_id)
+        ok = False
         try:
-            await safe_edit_panel(query, "🚫 فیلتر کلمات", reply_markup=get_filter_menu_keyboard(user_id))
-        except Exception:
+            ok = await safe_edit_panel(query, "🚫 فیلتر کلمات\n\nکلمه اضافه: `.فیلتر تبلیغ` یا `فیلتر تبلیغ`", reply_markup=kb)
+        except Exception as e:
+            logger.error(f"open_filter safe_edit: {e}")
+        if not ok:
             try:
-                await context.bot.send_message(chat_id=chat_id, text="🚫 فیلتر کلمات", reply_markup=get_filter_menu_keyboard(user_id))
+                await query.edit_message_reply_markup(reply_markup=kb)
+                ok = True
+            except Exception as e:
+                logger.debug(f"open_filter markup: {e}")
+        if not ok:
+            try:
+                await context.bot.send_message(chat_id=chat_id, text="🚫 فیلتر کلمات\n\n`.فیلتر [کلمه]`", reply_markup=kb)
             except Exception as e:
                 logger.error(f"open_filter: {e}")
                 try:
@@ -12129,7 +12382,7 @@ OCR روی عکس (ریپلای)
 یا: عکس [توضیح]
 
 🔊 متن → ویس
-متن به ویس [متن]
+خط به صدا [متن]
 یا ریپلای روی متن + ویس
 
 🎙 ویس → متن
@@ -12989,7 +13242,7 @@ OCR روی عکس (ریپلای)
         return
     if cmd == 'ai_tts':
         help_txt = (
-            "🔊 متن به ویس (Kira TTS)\n\n"
+            "🔊 خط به صدا\n\n"
             "• متن به ویس سلام خوبی؟\n"
             "• یا ریپلای روی یک متن + بنویس: ویس"
         )
@@ -13000,9 +13253,9 @@ OCR روی عکس (ریپلای)
         return
     if cmd == 'ai_stt':
         help_txt = (
-            "🎙 ویس به متن (Kira STT)\n\n"
+            "🎙 صدا به خط\n\n"
             "روی یک ویس ریپلای کنید و بنویسید:\n"
-            "• متن\n• ویس به متن\n• تبدیل ویس"
+            "• صدا به خط"
         )
         try:
             await safe_edit_panel(query, help_txt, reply_markup=get_ai_menu_keyboard(user_id))
