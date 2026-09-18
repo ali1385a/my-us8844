@@ -116,7 +116,7 @@ def home():
     return jsonify({
         "status": "running",
         "bot": "VROOM",
-        "version": "5.2.1"
+        "version": "5.3.0"
     })
 
 @flask_app.route('/health')
@@ -981,7 +981,7 @@ SPAM_MESSAGES = [
     "کص ننت تو فروشگاه تنگستن کس داد، تنگستن کس شد و شکست",
 ]
 
-BOT_VERSION = "5.2.1"
+BOT_VERSION = "5.3.0"
 BOT_CREATOR = "VROOM"
 PANEL_HEADER_IMAGE = "panel_header.png"  # تصویر بالای پنل (تصویر جدید VROOM)
 
@@ -2943,18 +2943,73 @@ def format_world_times() -> str:
 
 # ========== اسکن QR ==========
 async def scan_qr_from_image_path(img_path: str):
-    """برگرداندن لیست متن‌های QR از تصویر. در صورت نبود pyzbar از None."""
+    """اسکن QR: OpenCV → pyzbar → نصب خودکار"""
+    out = []
+    # 1) OpenCV (بدون libzbar)
     try:
+        import cv2
+        img = cv2.imread(img_path)
+        if img is not None:
+            det = cv2.QRCodeDetector()
+            data, _, _ = det.detectAndDecode(img)
+            if data:
+                out.append(data)
+            # multi
+            try:
+                retval, decoded_info, _, _ = det.detectAndDecodeMulti(img)
+                if retval and decoded_info:
+                    for d in decoded_info:
+                        if d and d not in out:
+                            out.append(d)
+            except Exception:
+                pass
+        if out:
+            return out
+    except Exception as e:
+        logger.debug(f"opencv qr: {e}")
+    # 2) pyzbar
+    def _pyzbar():
         from pyzbar.pyzbar import decode as zbar_decode
         from PIL import Image as _PILImage
         img = _PILImage.open(img_path)
+        if img.mode != "RGB":
+            img = img.convert("RGB")
         results = zbar_decode(img)
-        return [r.data.decode("utf-8", errors="replace") for r in results] if results else []
+        local = []
+        for r in results:
+            try:
+                local.append(r.data.decode("utf-8", errors="replace"))
+            except Exception:
+                local.append(str(r.data))
+        return local
+    try:
+        out = _pyzbar()
+        if out:
+            return out
     except ImportError:
-        return None  # library missing
+        try:
+            import subprocess, sys
+            subprocess.run([sys.executable, "-m", "pip", "install", "opencv-python-headless", "pyzbar", "pillow", "-q"],
+                           timeout=180, capture_output=True)
+            try:
+                import cv2
+                img = cv2.imread(img_path)
+                if img is not None:
+                    data, _, _ = cv2.QRCodeDetector().detectAndDecode(img)
+                    if data:
+                        return [data]
+            except Exception:
+                pass
+            try:
+                return _pyzbar() or ["⚠️ QR پیدا نشد"]
+            except Exception:
+                return ["⚠️ پس از نصب، QR خوانده نشد. libzbar0 را روی سرور نصب کنید."]
+        except Exception as e:
+            return [f"⚠️ نصب کتابخانه QR ناموفق: {e}"]
     except Exception as e:
         logger.error(f"scan_qr: {e}")
-        return []
+        return [f"⚠️ خطا در اسکن: {e}"]
+    return out or ["⚠️ کد QR در تصویر پیدا نشد"]
 
 
 async def get_ai_response(text, ai_type=1, user_id=None):
@@ -3352,6 +3407,7 @@ class SelfBotManager:
         # ترجمه مخصوص یک کاربر (پنل کاربر): target_id -> {lang: bool}
         self.per_user_translate = {}
         self.search_mode = False
+        self.app_download_mode = False
         self.last_search_results = []
         self.connection_attempts = 0
         self.max_attempts = 2
@@ -3636,15 +3692,29 @@ class SelfBotManager:
             if post_key in self.auto_comment_sent:
                 return
             config = self.auto_comment_settings[cid]
-            # ارسال فوری بدون تأخیر
-            await self.client.send_message(
-                chat.id,
-                config['text'],
-                reply_to=message.id
-            )
             self.auto_comment_sent.add(post_key)
-            self.save_state()
-            logger.info(f"✅ نظر ارسال شد به پست {message.id} در کانال {config['title']}")
+            # ارسال فوری حداکثر سرعت
+            text_c = config.get('text') or ''
+            async def _send_fast():
+                try:
+                    await self.client.send_message(chat.id, text_c, reply_to=message.id)
+                    logger.info(f"✅ نظر سریع به پست {message.id}")
+                except Exception as e1:
+                    # کانال ممکن است discussion group جدا داشته باشد
+                    try:
+                        full = await self.client.get_entity(chat.id)
+                        linked = getattr(full, 'linked_chat_id', None)
+                        if linked:
+                            await self.client.send_message(linked, text_c, comment_to=message.id)
+                        else:
+                            raise e1
+                    except Exception as e2:
+                        logger.error(f"کامنت سریع: {e2}")
+                try:
+                    self.save_state()
+                except Exception:
+                    pass
+            asyncio.create_task(_send_fast())
         except Exception as e:
             logger.error(f"خطا در ارسال نظر اتوماتیک: {e}")
     
@@ -7265,50 +7335,73 @@ class SelfBotManager:
             return
 
         # ========== آب و هوا ==========
-        if cmd in ('هوا', 'آب‌وهوا', 'اب و هوا') or (cmd == 'آب' and args and args[0] in ('و', 'وهوا')) or command_text.startswith('آب و هوا'):
+        if cmd in ('هوا', 'آب‌وهوا', 'اب و هوا') or (cmd == 'آب' and args) or command_text.startswith('آب و هوا') or command_text.startswith('هوا '):
             city = ' '.join(args)
-            if cmd == 'آب' or command_text.startswith('آب و هوا'):
-                city = command_text.replace('آب و هوا', '').replace('آب‌وهوا', '').replace('هوا', '').strip()
+            if command_text.startswith('آب و هوا'):
+                city = command_text.replace('آب و هوا', '').replace('آب‌وهوا', '').strip()
+            elif command_text.startswith('هوا '):
+                city = command_text[4:].strip()
             if not city:
                 city = 'Tehran'
             await event.edit(f"🌤 آب و هوای {city}...")
             try:
-                # wttr.in — بدون کلید API
-                url = f"https://wttr.in/{requests.utils.quote(city)}?format=j1&lang=fa"
-                r = requests.get(url, timeout=12, headers={"User-Agent": "selfbot"})
+                url = f"https://wttr.in/{requests.utils.quote(city)}?format=j1"
+                r = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
                 if r.status_code != 200:
-                    # fallback text
-                    r2 = requests.get(f"https://wttr.in/{requests.utils.quote(city)}?lang=fa&T", timeout=12, headers={"User-Agent": "selfbot"})
-                    await event.edit(r2.text[:3500] if r2.status_code == 200 else "❌ خطا در دریافت آب و هوا")
+                    await event.edit("❌ خطا در دریافت آب و هوا")
                     return
                 data = r.json()
-                cur = data.get('current_condition', [{}])[0]
+                cur = (data.get('current_condition') or [{}])[0]
                 area = (data.get('nearest_area') or [{}])[0]
-                name = ''
                 try:
                     name = area.get('areaName', [{}])[0].get('value', city)
+                    country = area.get('country', [{}])[0].get('value', '')
                 except Exception:
-                    name = city
+                    name, country = city, ''
                 temp = cur.get('temp_C', '?')
                 feels = cur.get('FeelsLikeC', '?')
-                desc = ''
-                try:
-                    desc = cur.get('lang_fa', cur.get('weatherDesc', [{}]))[0].get('value', '')
-                except Exception:
-                    desc = str(cur.get('weatherDesc', ''))
                 hum = cur.get('humidity', '?')
                 wind = cur.get('windspeedKmph', '?')
+                wind_dir = cur.get('winddir16Point', '')
+                vis = cur.get('visibility', '?')
+                pressure = cur.get('pressure', '?')
+                cloud = cur.get('cloudcover', '?')
+                uv = cur.get('uvIndex', '?')
+                desc = ''
+                try:
+                    desc = (cur.get('lang_fa') or cur.get('weatherDesc') or [{}])[0].get('value', '')
+                except Exception:
+                    desc = str(cur.get('weatherDesc', ''))
+                # پیش‌بینی امروز
+                forecast = ''
+                try:
+                    day0 = (data.get('weather') or [{}])[0]
+                    forecast = (
+                        f"\n📅 امروز:\n"
+                        f"  ▸ بیشینه: {day0.get('maxtempC', '?')}°C\n"
+                        f"  ▸ کمینه: {day0.get('mintempC', '?')}°C\n"
+                        f"  ▸ شانس باران: {day0.get('dailyChanceOfRain', '?')}%"
+                    )
+                except Exception:
+                    pass
                 txt = (
-                    f"🌤 **آب و هوا — {name}**\\n\\n"
-                    f"🌡 دما: {temp}°C (احساس: {feels}°C)\\n"
-                    f"☁️ وضعیت: {desc}\\n"
-                    f"💧 رطوبت: {hum}%\\n"
-                    f"💨 باد: {wind} km/h"
+                    f"🌤 <b>آب و هوا — {name}</b>" + (f" ({country})" if country else "") + "\n\n"
+                    f"🌡 دما: <code>{temp}°C</code>\n"
+                    f"🤒 احساس: <code>{feels}°C</code>\n"
+                    f"☁️ وضعیت: {desc}\n"
+                    f"💧 رطوبت: <code>{hum}%</code>\n"
+                    f"💨 باد: <code>{wind} km/h</code> {wind_dir}\n"
+                    f"👁 دید: <code>{vis} km</code>\n"
+                    f"⏲ فشار: <code>{pressure} hPa</code>\n"
+                    f"☁ ابر: <code>{cloud}%</code>\n"
+                    f"☀️ UV: <code>{uv}</code>"
+                    f"{forecast}"
                 )
-                await event.edit(txt)
+                await event.edit(txt, parse_mode='html')
             except Exception as e:
-                await event.edit(f"❌ {str(e)[:120]}")
+                await event.edit(f"❌ {str(e)[:150]}")
             return
+
 
         # ========== ویکی‌پدیا ==========
         if cmd in ('ویکی', 'ویکیپدیا', 'wikipedia') or (cmd == 'ویکی' and args):
@@ -8463,28 +8556,36 @@ class SelfBotManager:
                         pass
                 if reaction and reaction in ALLOWED_EMOJIS:
                     reacted = False
-                    for peer_getter in (
-                        lambda: event.get_input_chat(),
-                        lambda: self.client.get_input_entity(event.chat_id),
-                        lambda: self.client.get_input_entity(chat_id),
-                    ):
-                        if reacted:
-                            break
-                        try:
-                            peer = await peer_getter()
-                            await self.client(SendReactionRequest(
-                                peer=peer,
-                                msg_id=event.message.id,
-                                reaction=[ReactionEmoji(emoticon=reaction)]
-                            ))
+                    # روش ۱: message.react (Telethon جدید)
+                    try:
+                        if hasattr(event.message, 'react'):
+                            await event.message.react(reaction)
                             reacted = True
-                        except ChatWriteForbiddenError:
-                            logger.warning(f"⚠️ اجازه ریکت در چت {chat_id} نیست")
-                            break
-                        except FloodWaitError as fl:
-                            await asyncio.sleep(min(getattr(fl, 'seconds', 5), 20))
-                        except Exception as e:
-                            logger.debug(f"ریکت تلاش ناموفق: {e}")
+                    except Exception as e:
+                        logger.debug(f"react method: {e}")
+                    if not reacted:
+                        for peer_getter in (
+                            lambda: event.get_input_chat(),
+                            lambda: self.client.get_input_entity(event.chat_id),
+                            lambda: self.client.get_input_entity(chat_id),
+                        ):
+                            if reacted:
+                                break
+                            try:
+                                peer = await peer_getter()
+                                await self.client(SendReactionRequest(
+                                    peer=peer,
+                                    msg_id=event.message.id,
+                                    reaction=[ReactionEmoji(emoticon=reaction)]
+                                ))
+                                reacted = True
+                            except ChatWriteForbiddenError:
+                                logger.warning(f"⚠️ اجازه ریکت در چت {chat_id} نیست")
+                                break
+                            except FloodWaitError as fl:
+                                await asyncio.sleep(min(getattr(fl, 'seconds', 5), 20))
+                            except Exception as e:
+                                logger.debug(f"ریکت تلاش ناموفق: {e}")
                     if not reacted:
                         logger.error(f"خطا در ارسال ریکت خودکار برای {sender_id} در {chat_id}")
             except Exception as e:
@@ -8986,6 +9087,14 @@ class SelfBotManager:
         except Exception as _aq:
             logger.debug(f"auto_qr: {_aq}")
 
+        if getattr(self, 'app_download_mode', False) and message_text and not is_bot_command_text(message_text):
+            # دانلود برنامه: متن = نام برنامه
+            try:
+                await event.edit(f"📥 دانلود: {message_text}")
+            except Exception:
+                pass
+            await self.handle_google_search(event, f"برنامه {message_text}")
+            return
         if self.search_mode and message_text and not is_bot_command_text(message_text):
             await self.handle_google_search(event, message_text)
             return
@@ -9024,10 +9133,11 @@ class SelfBotManager:
             return text
         lang = active[0]
         target_code = TRANSLATE_LANG_CODES.get(lang, lang)
-        if target_code == 'iw':
-            target_code = 'iw'
+        if target_code in ('iw', 'he'):
+            target_code = 'he'
         raw = str(text)
-        max_chunk = 450
+        # تکه‌های کوچک‌تر برای APIهای رایگان
+        max_chunk = 400
         chunks = []
         buf = raw
         while buf:
@@ -9042,48 +9152,55 @@ class SelfBotManager:
         out_parts = []
         for ch in chunks:
             translated = None
-            # 1) deep_translator با چند تلاش
-            for attempt in range(3):
+            # 1) MyMemory
+            try:
+                mm = await asyncio.to_thread(
+                    lambda: requests.get(
+                        "https://api.mymemory.translated.net/get",
+                        params={"q": ch[:450], "langpair": f"autodetect|{target_code}"},
+                        timeout=12,
+                    )
+                )
+                if mm.status_code == 200:
+                    translated = (mm.json().get("responseData") or {}).get("translatedText")
+                    if translated and translated.lower() == ch.lower():
+                        translated = None
+            except Exception as e:
+                logger.debug(f"mymemory: {e}")
+            # 2) LibreTranslate mirrors
+            if not translated:
+                for lt_url in (
+                    "https://libretranslate.com/translate",
+                    "https://translate.argosopentech.com/translate",
+                    "https://translate.terraprint.co/translate",
+                ):
+                    try:
+                        lt = await asyncio.to_thread(
+                            lambda u=lt_url: requests.post(
+                                u,
+                                json={"q": ch, "source": "auto", "target": target_code, "format": "text"},
+                                timeout=15,
+                                headers={"User-Agent": "SelfBot/5"},
+                            )
+                        )
+                        if lt.status_code == 200:
+                            translated = lt.json().get("translatedText")
+                            if translated:
+                                break
+                    except Exception as e:
+                        logger.debug(f"libre {lt_url}: {e}")
+            # 3) deep_translator last
+            if not translated:
                 try:
                     from deep_translator import GoogleTranslator
                     translated = await asyncio.wait_for(
-                        asyncio.to_thread(
-                            GoogleTranslator(source='auto', target=target_code).translate, ch
-                        ),
-                        timeout=25
-                    )
-                    if translated:
-                        break
-                except Exception as e:
-                    logger.debug(f"translate attempt {attempt}: {e}")
-                    await asyncio.sleep(1.5 * (attempt + 1))
-            # 2) MyMemory fallback
-            if not translated:
-                try:
-                    mm = requests.get(
-                        "https://api.mymemory.translated.net/get",
-                        params={"q": ch[:500], "langpair": f"autodetect|{target_code if target_code != 'iw' else 'he'}"},
-                        timeout=15,
-                    )
-                    if mm.status_code == 200:
-                        translated = (mm.json().get("responseData") or {}).get("translatedText")
-                except Exception as e:
-                    logger.debug(f"mymemory: {e}")
-            # 3) LibreTranslate public (best effort)
-            if not translated:
-                try:
-                    lt = requests.post(
-                        "https://libretranslate.com/translate",
-                        json={"q": ch, "source": "auto", "target": target_code if target_code != 'iw' else "he", "format": "text"},
+                        asyncio.to_thread(GoogleTranslator(source='auto', target=target_code).translate, ch),
                         timeout=20,
-                        headers={"User-Agent": "SelfBot"},
                     )
-                    if lt.status_code == 200:
-                        translated = lt.json().get("translatedText")
                 except Exception as e:
-                    logger.debug(f"libre: {e}")
+                    logger.debug(f"deep_translator: {e}")
             out_parts.append(translated if translated else ch)
-            await asyncio.sleep(0.35)  # فاصله برای جلوگیری از rate limit
+            await asyncio.sleep(0.2)
         return '\n'.join(out_parts) if out_parts else text
 
 
@@ -10050,15 +10167,18 @@ def get_main_panel_keyboard(user_id):
 def get_fortune_menu_keyboard(user_id):
     keyboard = [
         [InlineKeyboardButton("🌟 فال عمومی", callback_data=f"exec_fortune_general_{user_id}", style="primary")],
-        [InlineKeyboardButton("🕌 فال حافظ", callback_data=f"exec_fortune_hafez_{user_id}", style="primary")],
+        [InlineKeyboardButton("🕌 فال حافظ", callback_data=f"exec_fortune_hafez_{user_id}", style="success")],
         [InlineKeyboardButton("☕ فال قهوه", callback_data=f"exec_fortune_coffee_{user_id}", style="primary")],
-        
-        [
-            InlineKeyboardButton("📖 راهنما", callback_data=f"exec_fortune_help_{user_id}", style="primary")
-        ],
-        [InlineKeyboardButton("⚈ بازگشت", callback_data=f"back_main", style="danger")]
+        [InlineKeyboardButton("🔮 فال روزانه", callback_data=f"exec_fortune_daily_{user_id}", style="success")],
+        [InlineKeyboardButton("💘 فال عشق", callback_data=f"exec_fortune_love_{user_id}", style="danger")],
+        [InlineKeyboardButton("💼 فال شغل", callback_data=f"exec_fortune_job_{user_id}", style="primary")],
+        [InlineKeyboardButton("🎲 فال تصادفی", callback_data=f"exec_fortune_random_{user_id}", style="success")],
+        [InlineKeyboardButton("🌙 فال ماه", callback_data=f"exec_fortune_moon_{user_id}", style="primary")],
+        [InlineKeyboardButton("📖 راهنما", callback_data=f"exec_fortune_help_{user_id}", style="primary")],
+        [InlineKeyboardButton("⚈ بازگشت", callback_data=f"back_main", style="danger")],
     ]
     return InlineKeyboardMarkup(keyboard)
+
 
 def get_time_menu_keyboard(user_id):
     settings = db.get_selfbot_settings(user_id)
@@ -10370,6 +10490,9 @@ def get_tools_menu_keyboard(user_id):
         [
             InlineKeyboardButton("🎙 ویدیو → ویس", callback_data=f"exec_video_to_voice_{user_id}", style="primary"),
             InlineKeyboardButton("🔵 ویدیو گرد", callback_data=f"exec_video_note_help_{user_id}", style="success"),
+        ],
+        [
+            InlineKeyboardButton("🎙 ویس → متن", callback_data=f"exec_voice_to_text_help_{user_id}", style="success"),
         ],
         [
             InlineKeyboardButton(f"{'✓ ' if learn_on else ''}🧠 یادگیری روشن", callback_data=f"exec_learning_on_{user_id}", style="success" if learn_on else "primary"),
@@ -10765,27 +10888,45 @@ def get_translate_menu_keyboard(user_id):
 
 
 def get_crypto_menu_keyboard(user_id):
-    """منوی ارزها — نرخ / پریمیوم / استارز"""
     keyboard = [
         [
-            InlineKeyboardButton("📊 لیست شاخص‌ها", callback_data=f"exec_crypto_rates_{user_id}", style="primary"),
-            InlineKeyboardButton("💎 پریمیوم فرگمنت", callback_data=f"exec_crypto_premium_{user_id}", style="success"),
+            InlineKeyboardButton("💵 دلار", callback_data=f"exec_price_دلار_{user_id}", style="success"),
+            InlineKeyboardButton("💰 تتر", callback_data=f"exec_price_تتر_{user_id}", style="primary"),
         ],
         [
-            InlineKeyboardButton("⭐ استارز فرگمنت", callback_data=f"exec_crypto_stars_{user_id}", style="primary"),
-            InlineKeyboardButton("📖 راهنما ارزها", callback_data=f"exec_crypto_help_{user_id}", style="primary"),
+            InlineKeyboardButton("🥇 طلا", callback_data=f"exec_price_طلا_{user_id}", style="success"),
+            InlineKeyboardButton("💴 یوان چین", callback_data=f"exec_price_یوان_{user_id}", style="primary"),
         ],
         [
-            InlineKeyboardButton("⚈ بازگشت", callback_data=f"back_main", style="danger")
+            InlineKeyboardButton("💶 یورو", callback_data=f"exec_price_یورو_{user_id}", style="primary"),
+            InlineKeyboardButton("💷 پوند", callback_data=f"exec_price_پوند_{user_id}", style="primary"),
+        ],
+        [
+            InlineKeyboardButton("🇦🇪 درهم", callback_data=f"exec_price_درهم_{user_id}", style="primary"),
+            InlineKeyboardButton("🇹🇷 لیر", callback_data=f"exec_price_لیر_{user_id}", style="primary"),
+        ],
+        [
+            InlineKeyboardButton("₿ بیتکوین", callback_data=f"exec_price_بیتکوین_{user_id}", style="success"),
+            InlineKeyboardButton("Ξ اتریوم", callback_data=f"exec_price_اتریوم_{user_id}", style="primary"),
+        ],
+        [
+            InlineKeyboardButton("📊 نرخ همه", callback_data=f"exec_price_نرخ_{user_id}", style="success"),
+            InlineKeyboardButton("📖 راهنما", callback_data=f"exec_crypto_help_{user_id}", style="primary"),
+        ],
+        [
+            InlineKeyboardButton("⚈ بازگشت", callback_data=f"back_main", style="danger"),
         ],
     ]
     return InlineKeyboardMarkup(keyboard)
 
+
 def get_google_menu_keyboard(user_id):
     search_on = False
+    app_on = False
     try:
         if str(user_id) in selfbot_managers:
             search_on = bool(getattr(selfbot_managers[str(user_id)], 'search_mode', False))
+            app_on = bool(getattr(selfbot_managers[str(user_id)], 'app_download_mode', False))
     except Exception:
         pass
     keyboard = [
@@ -10794,7 +10935,8 @@ def get_google_menu_keyboard(user_id):
             InlineKeyboardButton(f"{'✓ ' if not search_on else ''}🔎 سرچ خاموش", callback_data=f"exec_search_off_{user_id}", style="danger" if not search_on else "primary"),
         ],
         [
-            InlineKeyboardButton("📥 دانلود برنامه", callback_data=f"exec_app_download_help_{user_id}", style="success"),
+            InlineKeyboardButton(f"{'✓ ' if app_on else ''}📥 دانلود برنامه روشن", callback_data=f"exec_appdl_on_{user_id}", style="success" if app_on else "primary"),
+            InlineKeyboardButton(f"{'✓ ' if not app_on else ''}📥 دانلود خاموش", callback_data=f"exec_appdl_off_{user_id}", style="danger" if not app_on else "primary"),
         ],
         [
             InlineKeyboardButton("📖 راهنما", callback_data=f"exec_google_help_{user_id}", style="primary"),
@@ -10804,6 +10946,7 @@ def get_google_menu_keyboard(user_id):
         ],
     ]
     return InlineKeyboardMarkup(keyboard)
+
 
 
 
@@ -11035,7 +11178,13 @@ def get_btnset_menu_keyboard(user_id, page=0):
             on = (cur == style_name) or (style_name is None and cur in ("none", "off", ""))
             prefix = "✓" if on else " "
             st = style_name if style_name in ("primary", "success", "danger") else "primary"
-            return InlineKeyboardButton(f"{prefix}{label}", callback_data=f"exec_btnset_{key}_{style_name or 'none'}_{user_id}", style=st)
+            kw = {"text": f"{prefix}{label}", "callback_data": f"exec_btnset_{key}_{style_name or 'none'}_{user_id}"}
+            if st:
+                try:
+                    return InlineKeyboardButton(**kw, style=st)
+                except TypeError:
+                    pass
+            return InlineKeyboardButton(**kw)
         keyboard.append([
             InlineKeyboardButton(title[:12], callback_data=f"exec_btnset_noop_{user_id}", style="primary"),
             mark("primary", "🔵"),
@@ -11317,7 +11466,10 @@ async def _button_callback_impl(update: Update, context: ContextTypes.DEFAULT_TY
             return
     
     if data == "back_main":
-        # بازگشت به پنل اصلی → هدف پنل‌کاربر پاک شود
+        try:
+            await query.answer()
+        except Exception:
+            pass
         try:
             panel_lock_targets.pop(user_id, None)
             panel_lock_targets.pop(str(user_id), None)
@@ -11325,24 +11477,35 @@ async def _button_callback_impl(update: Update, context: ContextTypes.DEFAULT_TY
             pass
         name = get_main_panel_text(query.from_user)
         try:
+            kb = get_main_panel_keyboard(user_id)
+        except Exception as e:
+            logger.error(f"back_main keyboard: {e}")
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("✖️ بستن", callback_data=f"close_panel_{user_id}")]])
+        # 1) caption
+        try:
             if query.message and query.message.photo:
-                await query.edit_message_caption(
-                    caption=name,
-                    reply_markup=get_main_panel_keyboard(user_id)
-                )
-            else:
-                await safe_edit_panel(
-                    query,
-                    name,
-                    reply_markup=get_main_panel_keyboard(user_id)
-                )
-        except Exception:
-            try:
-                await query.edit_message_reply_markup(
-                    reply_markup=get_main_panel_keyboard(user_id)
-                )
-            except Exception as e:
-                logger.debug(f"back_main: {e}")
+                await query.edit_message_caption(caption=(name or "پنل")[:1024], reply_markup=kb)
+                return
+        except Exception as e:
+            logger.debug(f"back_main caption: {e}")
+        # 2) text
+        try:
+            await query.edit_message_text(text=name or "⬛ پنل کنترل", reply_markup=kb)
+            return
+        except Exception as e:
+            logger.debug(f"back_main text: {e}")
+        # 3) only markup
+        try:
+            await query.edit_message_reply_markup(reply_markup=kb)
+            return
+        except Exception as e:
+            logger.debug(f"back_main markup: {e}")
+        # 4) new message
+        try:
+            chat_id = query.message.chat_id if query.message else user_id
+            await context.bot.send_message(chat_id=chat_id, text=name or "⬛ پنل کنترل", reply_markup=kb)
+        except Exception as e:
+            logger.error(f"back_main send: {e}")
         return
     if data == "admin_panel":
         await admin_panel_handler(update, context)
@@ -13868,6 +14031,140 @@ OCR روی عکس (ریپلای)
                 "با زدن هر رنگ، همان بخش در منوی اصلی همان رنگ می‌شود.\n"
                 "از دکمه‌های قبل/بعد برای صفحات بعدی استفاده کنید.",
                 reply_markup=get_btnset_menu_keyboard(user_id, page=0),
+            )
+        except Exception:
+            pass
+        return
+
+
+    if cmd.startswith('price_'):
+        name = cmd[len('price_'):]
+        # simulate text command by calling same logic — send as status then use client
+        try:
+            if msg:
+                await msg.delete()
+        except Exception:
+            pass
+        # map to response via temporary message in chat
+        try:
+            if user_id_str not in selfbot_managers:
+                await query.answer("سلف فعال نیست", show_alert=True)
+                return
+            mgr = selfbot_managers[user_id_str]
+            # reuse text commands by editing a temp
+            mapping = {
+                'دلار': 'دلار', 'تتر': 'تتر', 'طلا': 'طلا', 'یوان': 'یوان',
+                'یورو': 'یورو', 'پوند': 'پوند', 'درهم': 'درهم', 'لیر': 'لیر',
+                'بیتکوین': 'بیتکوین', 'اتریوم': 'اتریوم', 'نرخ': 'نرخ ارز',
+            }
+            text_cmd = mapping.get(name, name)
+            await query.answer(f"در حال دریافت {text_cmd}...")
+            # send to saved messages / self
+            me = await mgr.client.get_me()
+            sent = await mgr.client.send_message('me', text_cmd)
+            # trigger is via outgoing handler - manually invoke price fetch
+            # simpler: call inline price helpers
+            if text_cmd == 'دلار' or name == 'دلار':
+                await mgr.client.send_message(chat_id, "دلار")  # may not work as command from bot chat
+            # Best: implement direct fetch here
+            import asyncio as _aio
+            async def _fetch_and_send(label):
+                # create fake event-like by using respond to bot chat
+                from types import SimpleNamespace
+                # Direct price functions
+                try:
+                    if label in ('دلار', 'تتر'):
+                        usdt_irt = 0
+                        try:
+                            r = requests.get("https://api.nobitex.ir/v2/orderbook/USDTIRT", timeout=10)
+                            j = r.json()
+                            usdt_irt = float(j.get("lastTradePrice") or (j.get("asks") or [[0]])[0][0] or 0)
+                        except Exception:
+                            pass
+                        if not usdt_irt:
+                            prices = await fetch_crypto_prices()
+                            usdt_irt = float((prices or {}).get("USDT/IRT") or 0)
+                        await context.bot.send_message(chat_id, f"💵 قیمت دلار/تتر:\n<code>{_fmt_price(usdt_irt)}</code> تومان\n📡 نوبیتکس", parse_mode='HTML')
+                    elif label == 'طلا':
+                        r2 = requests.get("https://call3.tgju.org/ajax.json", timeout=12, headers={"User-Agent": "Mozilla/5.0"})
+                        cur = (r2.json() or {}).get("current") or {}
+                        lines = ["🥇 قیمت طلا"]
+                        for key, title in [("ons", "انس جهانی"), ("geram18", "گرم ۱۸"), ("sekee", "سکه")]:
+                            item = cur.get(key)
+                            if isinstance(item, dict):
+                                lines.append(f"▫️ {title}: {item.get('p') or item.get('price')}")
+                            elif item:
+                                lines.append(f"▫️ {title}: {item}")
+                        await context.bot.send_message(chat_id, "\n".join(lines))
+                    elif label in ('یوان', 'یورو', 'پوند', 'درهم', 'لیر'):
+                        code = {"یوان": "CNY", "یورو": "EUR", "پوند": "GBP", "درهم": "AED", "لیر": "TRY"}[label]
+                        r = requests.get("https://api.exchangerate-api.com/v4/latest/USD", timeout=12)
+                        rates = (r.json() or {}).get("rates") or {}
+                        per = float(rates.get(code) or 0)
+                        usdt_irt = 0
+                        try:
+                            nr = requests.get("https://api.nobitex.ir/v2/orderbook/USDTIRT", timeout=10)
+                            nj = nr.json()
+                            usdt_irt = float(nj.get("lastTradePrice") or (nj.get("asks") or [[0]])[0][0] or 0)
+                        except Exception:
+                            pass
+                        irt = (usdt_irt / per) if per and usdt_irt else 0
+                        await context.bot.send_message(chat_id, f"💱 {label}:\n<code>{_fmt_price(irt)}</code> تومان\n(۱ {code})", parse_mode='HTML')
+                    elif label == 'نرخ ارز':
+                        text = await compile_crypto_rates_text()
+                        await context.bot.send_message(chat_id, text[:4000], parse_mode='HTML')
+                    else:
+                        # crypto card via map
+                        sym = PERSIAN_COIN_MAP.get(label)
+                        if sym and sym not in ('USD_IRT', 'GOLD', 'CNY', 'EUR', 'GBP', 'AED', 'TRY'):
+                            prices = await fetch_crypto_prices()
+                            usd = float(prices.get(f"{sym}/USDT", 0) or 0)
+                            irt = float(prices.get(f"{sym}/IRT", 0) or 0)
+                            await context.bot.send_message(chat_id, f"💎 {label} ({sym})\n💵 ${ _fmt_price(usd) }\nتومان: {_fmt_price(irt)}")
+                        else:
+                            await context.bot.send_message(chat_id, f"در سلف بنویسید: {label}")
+                except Exception as e:
+                    await context.bot.send_message(chat_id, f"❌ {e}")
+            await _fetch_and_send(text_cmd if text_cmd != 'نرخ ارز' else 'نرخ ارز')
+        except Exception as e:
+            logger.error(f"price btn: {e}")
+            try:
+                await query.answer(str(e)[:100], show_alert=True)
+            except Exception:
+                pass
+        return
+
+
+
+    if cmd in ('fortune_daily', 'fortune_love', 'fortune_job', 'fortune_random', 'fortune_moon'):
+        import random
+        pools = {
+            'fortune_daily': ["امروز روز خوبی برای شروع است.", "کمی صبر کن؛ نتیجه می‌رسد.", "انرژی مثبت اطرافت زیاد است.", "به خودت فرصت بده."],
+            'fortune_love': ["عشق در راه است.", "با کسی از گذشته دوباره حرف می‌زنی.", "قلب‌ها نزدیک‌تر می‌شوند.", "صداقت، کلید رابطه است."],
+            'fortune_job': ["فرصت شغلی نزدیک است.", "تلاشت دیده می‌شود.", "تغییر کوچک، نتیجه بزرگ.", "روی مهارت جدید سرمایه‌گذاری کن."],
+            'fortune_random': ["ستاره بخت با توست.", "یک خبر خوب در راه است.", "امروز تصمیم مهم نگیر.", "مسیرت درست است."],
+            'fortune_moon': ["ماه نو: شروع دوباره.", "ماه کامل: احساسات قوی.", "نیمه‌ماه: تعادل لازم است.", "ماه در عقرب: مراقب انرژی باش."],
+        }
+        text = random.choice(pools.get(cmd, pools['fortune_random']))
+        try:
+            if msg:
+                await msg.edit_text(f"🔮 {text}")
+            else:
+                await context.bot.send_message(chat_id, f"🔮 {text}")
+        except Exception:
+            try:
+                await context.bot.send_message(chat_id, f"🔮 {text}")
+            except Exception:
+                pass
+        return
+
+
+    if cmd == 'voice_to_text_help':
+        try:
+            await safe_edit_panel(
+                query,
+                "🎙 ویس به متن\n\nروی یک ویس ریپلای کنید و در سلف بنویسید:\nصدا به خط\nیا: ویس به متن\n\nمتن دقیق در همان چت ارسال می‌شود.",
+                reply_markup=get_tools_menu_keyboard(user_id),
             )
         except Exception:
             pass
